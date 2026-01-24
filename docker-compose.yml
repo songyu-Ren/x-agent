@@ -1,0 +1,26 @@
+version: '3.8'
+
+services:
+  app:
+    build: .
+    container_name: daily-x-agent
+    ports:
+      - "8000:8000"
+    volumes:
+      - .:/app
+      - ./daily_agent.db:/app/daily_agent.db
+    environment:
+      - SMTP_SERVER=mailhog
+      - SMTP_PORT=1025
+      - ENV=production
+    env_file:
+      - .env
+    depends_on:
+      - mailhog
+
+  mailhog:
+    image: mailhog/mailhog
+    container_name: mailhog
+    ports:
+      - "1025:1025"  # SMTP
+      - "8025:8025"  # Web UI

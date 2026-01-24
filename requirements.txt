@@ -1,0 +1,15 @@
+fastapi
+uvicorn
+pydantic
+pydantic-settings
+apscheduler
+tweepy
+openai
+sendgrid
+twilio
+jinja2
+python-multipart
+pytest
+httpx
+requests
+python-dotenv
