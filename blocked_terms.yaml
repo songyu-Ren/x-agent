@@ -1,0 +1,13 @@
+blocked_terms:
+  - password
+  - secret
+  - token
+  - api_key
+  - client_secret
+  - private_key
+  - access_token
+  - refresh_token
+  - ssn
+  - credit card
+  - customer data
+  - pii

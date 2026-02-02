@@ -24,16 +24,47 @@ class Settings(BaseSettings):
     SENSITIVE_WORDS: str = "password,secret,token,api_key"
 
     # LLM
-    OPENROUTER_API_KEY: str
+    OPENROUTER_API_KEY: str = ""
     OPENROUTER_MODEL: str = "openai/gpt-4o-mini"
     OPENROUTER_BASE_URL: str = "https://openrouter.ai/api/v1"
 
     # Twitter
-    TWITTER_API_KEY: str
-    TWITTER_API_SECRET: str
-    TWITTER_ACCESS_TOKEN: str
-    TWITTER_ACCESS_TOKEN_SECRET: str
+    TWITTER_API_KEY: str = ""
+    TWITTER_API_SECRET: str = ""
+    TWITTER_ACCESS_TOKEN: str = ""
+    TWITTER_ACCESS_TOKEN_SECRET: str = ""
     DRY_RUN: bool = True
+
+    # V2 Controls
+    TOKEN_TTL_HOURS: int = 36
+    REWRITE_MAX: int = 1
+    SIMILARITY_THRESHOLD: float = 0.6
+    METRICS_ENABLED: bool = True
+    BLOCKED_TERMS_PATH: str = "./blocked_terms.yaml"
+
+    # Sources (plugins)
+    ENABLE_SOURCE_NOTION: bool = False
+    ENABLE_SOURCE_GITHUB: bool = False
+    ENABLE_SOURCE_RSS: bool = False
+    NOTION_API_KEY: str = ""
+    NOTION_DB_ID: str = ""
+    GITHUB_TOKEN: str = ""
+    GITHUB_REPO: str = ""
+    RSS_FEED_URLS: str = ""
+
+    # Thread
+    THREAD_ENABLED: bool = False
+    THREAD_MAX_TWEETS: int = 5
+    THREAD_NUMBERING_ENABLED: bool = True
+
+    # Style weekly update
+    STYLE_UPDATE_WEEKDAY: int = 1
+    STYLE_UPDATE_HOUR: int = 9
+    STYLE_INPUT_POSTS: int = 30
+
+    # Weekly report
+    WEEKLY_REPORT_WEEKDAY: int = 1
+    WEEKLY_REPORT_HOUR: int = 10
 
     # Email
     EMAIL_PROVIDER: str = "smtp"  # sendgrid or smtp

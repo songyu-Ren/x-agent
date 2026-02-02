@@ -1,76 +1,25 @@
 import logging
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
-
 from app.config import settings
-from app.collector import collect_materials
-from app.llm import generate_candidates, rewrite_draft
-from app.reviewer import review_draft
-from app.storage import create_draft, update_draft_status
-from app.notifier import notify_user
+from app.orchestrator import orchestrator
 
 logger = logging.getLogger(__name__)
-
 scheduler = AsyncIOScheduler()
 
-async def run_daily_cycle(source: str = "scheduler"):
-    logger.info(f"Starting daily cycle from {source}...")
-    
-    # 1. Collect
-    materials = collect_materials()
-    logger.info("Materials collected.")
+async def scheduled_job():
+    logger.info("Scheduler triggering daily run...")
+    orchestrator.start_run(source="scheduler")
 
-    # 2. Generate
-    candidates = generate_candidates(materials)
-    logger.info(f"Generated {len(candidates)} candidates.")
 
-    if not candidates:
-        logger.error("No candidates generated.")
-        return
+async def scheduled_style_update():
+    logger.info("Scheduler triggering weekly style update...")
+    orchestrator.update_style_profile()
 
-    # 3. Review & Select
-    final_text = candidates[0] # Default to first
-    is_attention_needed = False
-    
-    # Try to find a passing candidate
-    found_passing = False
-    for cand in candidates:
-        passed, reasons = review_draft(cand)
-        if passed:
-            final_text = cand
-            found_passing = True
-            break
-        else:
-            logger.info(f"Candidate rejected: {cand} Reasons: {reasons}")
-    
-    # If none passed, try rewrite the first one once
-    if not found_passing:
-        logger.info("No candidates passed. Attempting rewrite of first candidate...")
-        passed, reasons = review_draft(candidates[0]) # Get reasons again
-        final_text = rewrite_draft(candidates[0], "; ".join(reasons))
-        
-        # Check again
-        passed, reasons = review_draft(final_text)
-        if not passed:
-            logger.warning(f"Rewrite still failed: {reasons}. Marking for human attention.")
-            is_attention_needed = True
 
-    # 4. Store
-    token = create_draft(
-        materials=materials,
-        candidates=candidates,
-        final_text=final_text,
-        source=source
-    )
-    
-    if is_attention_needed:
-        update_draft_status(token, "needs_human_attention")
-
-    logger.info(f"Draft created: {token}")
-
-    # 5. Notify
-    notify_user(token, final_text, is_attention_needed)
-    logger.info("User notified.")
+async def scheduled_weekly_report():
+    logger.info("Scheduler triggering weekly report...")
+    orchestrator.generate_weekly_report()
 
 def start_scheduler():
     trigger = CronTrigger(
@@ -78,6 +27,20 @@ def start_scheduler():
         minute=settings.SCHEDULE_MINUTE,
         timezone=settings.TIMEZONE
     )
-    scheduler.add_job(run_daily_cycle, trigger)
+    scheduler.add_job(scheduled_job, trigger)
+
+    style_weekday = int(getattr(settings, "STYLE_UPDATE_WEEKDAY", 1) or 1)
+    style_hour = int(getattr(settings, "STYLE_UPDATE_HOUR", 9) or 9)
+    scheduler.add_job(
+        scheduled_style_update,
+        CronTrigger(day_of_week=(style_weekday - 1) % 7, hour=style_hour, minute=0, timezone=settings.TIMEZONE),
+    )
+
+    report_weekday = int(getattr(settings, "WEEKLY_REPORT_WEEKDAY", 1) or 1)
+    report_hour = int(getattr(settings, "WEEKLY_REPORT_HOUR", 10) or 10)
+    scheduler.add_job(
+        scheduled_weekly_report,
+        CronTrigger(day_of_week=(report_weekday - 1) % 7, hour=report_hour, minute=0, timezone=settings.TIMEZONE),
+    )
     scheduler.start()
     logger.info(f"Scheduler started. Next run at {settings.SCHEDULE_HOUR}:{settings.SCHEDULE_MINUTE} {settings.TIMEZONE}")

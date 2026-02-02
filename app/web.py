@@ -1,179 +1,292 @@
-import logging
+import json
 import secrets
-from typing import Optional
-from fastapi import APIRouter, Depends, HTTPException, status, Form, BackgroundTasks
-from fastapi.responses import HTMLResponse, RedirectResponse
+from datetime import datetime, timedelta, timezone
+
+from fastapi import APIRouter, BackgroundTasks, Depends, Form, HTTPException, Query, status
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 
 from app.config import settings
-from app.storage import get_draft, update_draft_status, update_draft_text, get_recent_drafts
-from app.reviewer import review_draft
-from app.twitter_client import post_tweet
-from app.scheduler import run_daily_cycle
+from app.database import get_connection
+from app.orchestrator import orchestrator
 
-logger = logging.getLogger(__name__)
 router = APIRouter()
 security = HTTPBasic()
 
-def get_current_username(credentials: HTTPBasicCredentials = Depends(security)):
+
+def _require_basic(credentials: HTTPBasicCredentials = Depends(security)):
     if not settings.BASIC_AUTH_USER or not settings.BASIC_AUTH_PASS:
         return "anonymous"
-    
-    current_username_bytes = credentials.username.encode("utf8")
-    correct_username_bytes = settings.BASIC_AUTH_USER.encode("utf8")
-    is_correct_username = secrets.compare_digest(current_username_bytes, correct_username_bytes)
-    
-    current_password_bytes = credentials.password.encode("utf8")
-    correct_password_bytes = settings.BASIC_AUTH_PASS.encode("utf8")
-    is_correct_password = secrets.compare_digest(current_password_bytes, correct_password_bytes)
-    
-    if not (is_correct_username and is_correct_password):
+
+    ok_user = secrets.compare_digest(
+        credentials.username.encode("utf8"), settings.BASIC_AUTH_USER.encode("utf8")
+    )
+    ok_pass = secrets.compare_digest(
+        credentials.password.encode("utf8"), settings.BASIC_AUTH_PASS.encode("utf8")
+    )
+    if not (ok_user and ok_pass):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Incorrect email or password",
+            detail="Unauthorized",
             headers={"WWW-Authenticate": "Basic"},
         )
     return credentials.username
 
-def auth_wrapper(func):
-    """Dependency wrapper for optional auth."""
+
+def _auth_dep():
     if settings.BASIC_AUTH_USER and settings.BASIC_AUTH_PASS:
-        return Depends(get_current_username)
+        return Depends(_require_basic)
     return lambda: None
 
-def render_html(title: str, content: str, error: str = "") -> str:
-    error_html = f'<div style="color:red; background:#ffe6e6; padding:10px; margin-bottom:10px;">{error}</div>' if error else ""
-    return f"""
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <meta name="viewport" content="width=device-width, initial-scale=1">
-        <title>{title} - Daily X Agent</title>
-        <style>
-            body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; padding: 20px; max_width: 600px; margin: 0 auto; }}
-            button {{ padding: 10px 20px; font-size: 16px; cursor: pointer; }}
-            textarea {{ width: 100%; height: 150px; font-size: 16px; padding: 10px; margin-bottom: 10px; }}
-            .status {{ padding: 10px; margin-bottom: 20px; border-radius: 5px; }}
-            .pending {{ background-color: #e6f7ff; }}
-            .posted {{ background-color: #d4edda; color: #155724; }}
-            .error {{ background-color: #f8d7da; color: #721c24; }}
-        </style>
-    </head>
-    <body>
-        <h1>{title}</h1>
-        {error_html}
-        {content}
-    </body>
-    </html>
-    """
+
+def _html(title: str, body: str, status_code: int = 200) -> HTMLResponse:
+    page = f"""
+<!doctype html>
+<html>
+<head>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{title} - Daily X Agent</title>
+  <style>
+    body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; padding: 16px; max-width: 760px; margin: 0 auto; }}
+    pre {{ white-space: pre-wrap; background: #f7f7f7; padding: 12px; border-radius: 8px; border: 1px solid #eee; }}
+    .btn {{ display: inline-block; padding: 10px 14px; border-radius: 8px; text-decoration: none; color: white; margin-right: 8px; }}
+    .green {{ background: #1f8b4c; }}
+    .blue {{ background: #1a73e8; }}
+    .gray {{ background: #6b7280; }}
+    .red {{ background: #b42318; }}
+    .muted {{ color: #666; }}
+    textarea {{ width: 100%; min-height: 120px; font-size: 16px; padding: 10px; border-radius: 8px; border: 1px solid #ddd; }}
+    .row {{ margin: 10px 0; }}
+    .card {{ border: 1px solid #eee; border-radius: 10px; padding: 12px; margin: 12px 0; }}
+    code {{ background: #f0f0f0; padding: 2px 6px; border-radius: 6px; }}
+  </style>
+</head>
+<body>
+  <h1>{title}</h1>
+  {body}
+</body>
+</html>
+"""
+    return HTMLResponse(page, status_code=status_code)
+
 
 @router.get("/health")
-def health_check():
+def health():
     return {"status": "ok"}
 
-@router.get("/approve/{token}", response_class=HTMLResponse, dependencies=[auth_wrapper(get_current_username)])
-def approve_draft(token: str):
-    draft = get_draft(token)
-    if not draft:
-        return render_html("Error", "Draft not found.", error="Invalid Token")
-    
-    if draft['status'] in ['posted', 'skipped', 'dry_run_posted']:
-        return render_html("Info", f"Draft already processed. Status: <strong>{draft['status']}</strong>")
-    
-    # Re-review
-    passed, reasons = review_draft(draft['final_text'])
-    if not passed:
-        return render_html(
-            "Security Check Failed", 
-            f"<p>Cannot approve. Issues found:</p><ul><li>{'</li><li>'.join(reasons)}</li></ul>"
-            f"<p><a href='/edit/{token}'>Go to Edit</a></p>"
-        )
 
-    try:
-        tweet_id = post_tweet(draft['final_text'])
-        new_status = "dry_run_posted" if settings.DRY_RUN else "posted"
-        update_draft_status(token, new_status, tweet_id=tweet_id)
-        
-        msg = f"Tweet posted successfully! ID: {tweet_id}"
-        if settings.DRY_RUN:
-            msg = f"[DRY RUN] Status updated. Tweet ID: {tweet_id} (Fake)"
-            
-        return render_html("Success", f"<p>{msg}</p>")
-    except Exception as e:
-        update_draft_status(token, "error", error=str(e))
-        return render_html("Error", f"Failed to post tweet.", error=str(e))
+@router.get("/metrics")
+def metrics():
+    if str(getattr(settings, "METRICS_ENABLED", "true")).lower() != "true":
+        return JSONResponse({"enabled": False}, status_code=404)
+    conn = get_connection()
+    runs_total = conn.execute("SELECT COUNT(*) FROM runs").fetchone()[0]
+    runs_failed = conn.execute("SELECT COUNT(*) FROM runs WHERE status='failed'").fetchone()[0]
+    avg_latency = conn.execute(
+        "SELECT AVG(duration_ms) FROM runs WHERE duration_ms IS NOT NULL"
+    ).fetchone()[0]
+    drafts_total = conn.execute("SELECT COUNT(*) FROM drafts").fetchone()[0]
+    posts_total = conn.execute("SELECT COUNT(*) FROM posts").fetchone()[0]
+    conn.close()
+    return {
+        "runs_total": runs_total,
+        "runs_failed_total": runs_failed,
+        "avg_generation_latency_ms": int(avg_latency or 0),
+        "notifications_sent_total": drafts_total,
+        "posts_published_total": posts_total,
+    }
 
-@router.get("/edit/{token}", response_class=HTMLResponse, dependencies=[auth_wrapper(get_current_username)])
-def edit_draft_page(token: str):
-    draft = get_draft(token)
-    if not draft:
-        return render_html("Error", "Draft not found.")
-    
-    passed, reasons = review_draft(draft['final_text'])
-    review_html = ""
-    if not passed:
-        review_html = f'<div style="color:orange">⚠️ Issues: {", ".join(reasons)}</div>'
-    else:
-        review_html = '<div style="color:green">✅ Review passed</div>'
 
-    form = f"""
-    <div class="status {draft['status']}">Status: {draft['status']}</div>
-    {review_html}
-    <form method="post">
-        <textarea name="text">{draft['final_text']}</textarea>
-        <br>
-        <button type="submit">Save & Check</button>
-        <a href="/approve/{token}" style="margin-left:20px">Approve (if passed)</a>
-    </form>
-    """
-    return render_html("Edit Draft", form)
-
-@router.post("/edit/{token}", response_class=HTMLResponse, dependencies=[auth_wrapper(get_current_username)])
-def edit_draft_save(token: str, text: str = Form(...)):
-    draft = get_draft(token)
-    if not draft:
-        return render_html("Error", "Draft not found.")
-    
-    update_draft_text(token, text)
-    
-    passed, reasons = review_draft(text)
-    msg = "Draft updated."
-    if passed:
-        msg += " ✅ Review passed. You can now Approve."
-    else:
-        msg += f" ⚠️ Review failed: {', '.join(reasons)}"
-        
-    return render_html("Edit Draft", f"""
-        <p>{msg}</p>
-        <p><a href="/edit/{token}">Back to Edit</a> | <a href="/approve/{token}">Try Approve</a></p>
-    """)
-
-@router.get("/skip/{token}", response_class=HTMLResponse, dependencies=[auth_wrapper(get_current_username)])
-def skip_draft(token: str):
-    draft = get_draft(token)
-    if not draft:
-        return render_html("Error", "Draft not found.")
-        
-    update_draft_status(token, "skipped")
-    return render_html("Skipped", "<p>Draft marked as skipped.</p>")
-
-@router.post("/generate-now", dependencies=[auth_wrapper(get_current_username)])
+@router.post("/generate-now", dependencies=[_auth_dep()])
 async def generate_now(background_tasks: BackgroundTasks):
-    background_tasks.add_task(run_daily_cycle, source="manual")
-    return {"message": "Generation triggered in background."}
+    background_tasks.add_task(orchestrator.start_run, source="manual")
+    return {"message": "run triggered"}
 
-@router.get("/drafts", response_class=HTMLResponse, dependencies=[auth_wrapper(get_current_username)])
-def list_drafts():
-    drafts = get_recent_drafts(limit=7)
+
+@router.get("/approve/{token}", response_class=HTMLResponse, dependencies=[_auth_dep()])
+def approve(token: str):
+    code, msg = orchestrator.approve_draft(token)
+    if code == 200:
+        return _html("Approve", f"<div class='card'><p>{msg}</p></div>")
+    if code == 410:
+        return _html("Expired", "<p class='red'>Token expired (410)</p>", status_code=410)
+    return _html("Approve Failed", f"<p class='red'>{msg}</p>", status_code=code)
+
+
+@router.get("/skip/{token}", response_class=HTMLResponse, dependencies=[_auth_dep()])
+def skip(token: str):
+    code, msg = orchestrator.skip_draft(token)
+    return _html("Skip", f"<p>{msg}</p>", status_code=code)
+
+
+@router.get("/drafts", response_class=HTMLResponse, dependencies=[_auth_dep()])
+def list_drafts(status_filter: str | None = Query(default=None, alias="status")):
+    conn = get_connection()
+    since = datetime.now(timezone.utc) - timedelta(days=14)
+    if status_filter:
+        rows = conn.execute(
+            """
+            SELECT token, created_at, status, final_text FROM drafts
+            WHERE created_at >= ? AND status = ?
+            ORDER BY created_at DESC
+            LIMIT 200
+            """,
+            (since, status_filter),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            """
+            SELECT token, created_at, status, final_text FROM drafts
+            WHERE created_at >= ?
+            ORDER BY created_at DESC
+            LIMIT 200
+            """,
+            (since,),
+        ).fetchall()
+    conn.close()
     items = []
-    for d in drafts:
-        link = f"/edit/{d['token']}"
-        items.append(f"""
-            <li style="margin-bottom:10px; border-bottom:1px solid #eee; padding-bottom:5px;">
-                <strong>{d['created_at'][:16]}</strong> [{d['status']}]<br>
-                {d['final_text'][:50]}... <a href="{link}">View</a>
-            </li>
-        """)
-    
-    content = f"<ul>{''.join(items)}</ul>"
-    return render_html("Recent Drafts", content)
+    for r in rows:
+        token = r[0]
+        created_at = str(r[1])[:16]
+        st = r[2]
+        preview = (r[3] or "")[:80]
+        items.append(
+            f"<li><code>{created_at}</code> <b>{st}</b> — {preview} <a href='/draft/{token}'>details</a> <a href='/edit/{token}'>edit</a></li>"
+        )
+    filt = (
+        "<div class='row muted'>Filter: "
+        "<a href='/drafts'>all</a> | "
+        "<a href='/drafts?status=pending'>pending</a> | "
+        "<a href='/drafts?status=posted'>posted</a> | "
+        "<a href='/drafts?status=skipped'>skipped</a> | "
+        "<a href='/drafts?status=needs_human_attention'>needs_attention</a>"
+        "</div>"
+    )
+    body = filt + "<ul>" + "".join(items) + "</ul>"
+    return _html("Drafts (14 days)", body)
+
+
+@router.get("/draft/{token}", response_class=HTMLResponse, dependencies=[_auth_dep()])
+def draft_detail(token: str):
+    conn = get_connection()
+    d = conn.execute("SELECT * FROM drafts WHERE token=?", (token,)).fetchone()
+    if not d:
+        conn.close()
+        return _html("Not Found", "<p>draft not found</p>", status_code=404)
+    run = None
+    if d["run_id"]:
+        run = conn.execute("SELECT * FROM runs WHERE run_id=?", (d["run_id"],)).fetchone()
+    conn.close()
+
+    def _pre(title: str, value: str | None):
+        return f"<div class='card'><h3>{title}</h3><pre>{value or ''}</pre></div>"
+
+    body = (
+        f"<div class='card'><p><b>Status:</b> {d['status']}</p>"
+        f"<p><b>Token:</b> <code>{d['token']}</code></p>"
+        f"<p><a class='btn green' href='/approve/{token}'>Approve</a>"
+        f"<a class='btn blue' href='/edit/{token}'>Edit</a>"
+        f"<a class='btn gray' href='/skip/{token}'>Skip</a></p></div>"
+    )
+
+    if run:
+        body += _pre("Run", json.dumps({"run_id": run["run_id"], "status": run["status"], "duration_ms": run["duration_ms"]}, indent=2))
+        body += _pre("Agent Logs", run["agent_logs_json"])
+
+    body += _pre("Materials", d["materials_json"])
+    body += _pre("Topic Plan", d["topic_plan_json"])
+    body += _pre("Style Profile", d["style_profile_json"])
+    body += _pre("Thread Plan", d["thread_plan_json"])
+    body += _pre("Candidates", d["candidates_json"])
+    body += _pre("Edited Draft", d["edited_draft_json"])
+    body += _pre("Policy Report", d["policy_report_json"])
+    body += _pre("Final Text", d["final_text"])
+    if d["tweets_json"]:
+        body += _pre("Final Tweets", d["tweets_json"])
+    if d["published_tweet_ids_json"]:
+        body += _pre("Published Tweet IDs", d["published_tweet_ids_json"])
+    if d["last_error"]:
+        body += _pre("Last Error", d["last_error"])
+    return _html("Draft Detail", body)
+
+
+@router.get("/edit/{token}", response_class=HTMLResponse, dependencies=[_auth_dep()])
+def edit_page(token: str):
+    conn = get_connection()
+    d = conn.execute("SELECT * FROM drafts WHERE token=?", (token,)).fetchone()
+    conn.close()
+    if not d:
+        return _html("Not Found", "<p>draft not found</p>", status_code=404)
+    if d["token_consumed"] == 1:
+        return _html("Consumed", "<p>token already consumed</p>", status_code=409)
+
+    mode = "thread" if d["thread_enabled"] == 1 else "single"
+    tweets = []
+    if mode == "thread" and d["tweets_json"]:
+        try:
+            tweets = json.loads(d["tweets_json"]) or []
+        except Exception:
+            tweets = []
+    if mode == "single":
+        tweets = [d["final_text"] or ""]
+
+    textarea_html = ""
+    for idx, t in enumerate(tweets, start=1):
+        textarea_html += f"""
+        <div class='row'>
+          <div class='muted'>Tweet {idx} — <span id='count-{idx}'>0</span>/280</div>
+          <textarea id='text-{idx}' name='text'>{t}</textarea>
+        </div>
+        """
+
+    js = """
+    <script>
+      function bindCount(id, countId) {
+        const el = document.getElementById(id);
+        const c = document.getElementById(countId);
+        const update = () => { c.textContent = el.value.length; };
+        el.addEventListener('input', update);
+        update();
+      }
+    </script>
+    """
+    bind_calls = "".join([f"<script>bindCount('text-{i}','count-{i}');</script>" for i in range(1, len(tweets) + 1)])
+
+    body = f"""
+    <div class='card'>
+      <p><b>Status:</b> {d['status']} <span class='muted'>(mode={mode})</span></p>
+      <form method='post'>
+        {textarea_html}
+        <div class='row'>
+          <button class='btn blue' type='submit'>Save & Check</button>
+          <a class='btn green' href='/approve/{token}'>Approve</a>
+          <a class='btn gray' href='/draft/{token}'>Details</a>
+        </div>
+      </form>
+      <form method='post' action='/regenerate/{token}' style='margin-top:12px;'>
+        <button class='btn gray' type='submit'>Regenerate</button>
+      </form>
+    </div>
+    {js}
+    {bind_calls}
+    <div class='card'><h3>Policy Report</h3><pre>{d['policy_report_json'] or ''}</pre></div>
+    """
+    return _html("Edit Draft", body)
+
+
+@router.post("/edit/{token}", response_class=HTMLResponse, dependencies=[_auth_dep()])
+def edit_save(token: str, text: list[str] = Form(...)):
+    try:
+        code, report = orchestrator.save_edit(token, text)
+        return _html("Saved", f"<pre>{report.model_dump_json(indent=2)}</pre><p><a href='/edit/{token}'>Back</a></p>")
+    except Exception as e:
+        return _html("Error", f"<p>{str(e)}</p>", status_code=400)
+
+
+@router.post("/regenerate/{token}", response_class=HTMLResponse, dependencies=[_auth_dep()])
+def regenerate(token: str):
+    code, msg = orchestrator.regenerate(token)
+    if code == 200:
+        return _html("Regenerated", f"<p>{msg}</p><p><a href='/edit/{token}'>Back to edit</a></p>")
+    return _html("Regenerate Failed", f"<p>{msg}</p>", status_code=code)
+

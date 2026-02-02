@@ -1,96 +1,71 @@
-# Daily X Agent
+# Daily X Agent (Multi-Agent Architecture)
 
-A fully automated Daily X (Twitter) Agent that collects your development progress (git logs, devlog), generates draft tweets using LLM, and sends them to you for approval via Email/WhatsApp before posting.
+An automated Twitter agent powered by a multi-agent system to collect, curate, write, critique, and publish daily engineering updates.
 
-## Features
-- **Daily Collection**: Scans git commits and `devlog.md`.
-- **AI Generation**: Creates 3 candidates in "build-in-public" style.
-- **Safety Gates**: Checks length, sensitive words, and duplicates (Jaccard similarity).
-- **Human-in-the-loop**: Email notifications with "Approve", "Edit", "Skip" links.
-- **Web Interface**: Mobile-friendly pages for review and editing.
-- **Dry Run**: Test the whole flow without actually posting to X.
+## Architecture
 
-## Quick Start (Local)
+This system uses 7 specialized agents orchestrated by a central state machine:
 
-1. **Clone & Setup**
-   ```bash
-   git clone <repo>
-   cd daily-x-agent
-   pip install -r requirements.txt
-   ```
+1.  **CollectorAgent**: Gathers git logs and devlogs.
+2.  **CuratorAgent**: Decides the daily topic angle.
+3.  **WriterAgent**: Drafts content (build-in-public style).
+4.  **CriticAgent**: Reviews and refines the draft.
+5.  **PolicyAgent**: Checks safety, length, and fact-grounding.
+6.  **NotifierAgent**: Emails the human for approval.
+7.  **PublisherAgent**: Posts to X after approval.
 
-2. **Configuration**
-   Copy example config:
-   ```bash
-   cp .env.example .env
-   ```
-   Edit `.env` and fill in your keys (OpenRouter, Twitter, SendGrid/SMTP).
-   *Note: For local testing, you can use MailHog (see Docker section) or just set DRY_RUN=true.*
+See `docs/design.md` for full architectural details.
 
-3. **Run Server**
-   ```bash
-   uvicorn app.main:app --reload
-   ```
-   Open http://localhost:8000/health to verify.
+## Setup & Run
 
-4. **Verify / Smoke Test**
-   To trigger a cycle immediately (instead of waiting for the scheduler):
-   ```bash
-   # If you set Basic Auth, include -u user:pass
-   curl -X POST http://localhost:8000/generate-now -u admin:secret
-   ```
-   Check your email (or MailHog http://localhost:8025) for the draft notification.
+### 1. Environment
+Copy `.env.example` to `.env` and fill in keys:
+```bash
+cp .env.example .env
+```
+Required: `OPENROUTER_API_KEY`, `TWITTER_API_KEY` (and related), `SENDGRID_API_KEY` (or SMTP).
 
-## Docker Deployment (Recommended)
+### 2. Local Run
+```bash
+pip install -r requirements.txt
+uvicorn app.main:app --reload --port 8000
+```
+- Web UI: http://localhost:8000
+- Health Check: http://localhost:8000/health
 
-Includes **MailHog** for capturing emails locally so you don't need a real SMTP server for testing.
+### 3. Docker (Recommended)
+Includes MailHog for local email testing.
 
-1. **Build & Run**
-   ```bash
-   docker-compose up --build -d
-   ```
+```bash
+docker-compose up --build -d
+```
+- Agent: http://localhost:8000
+- MailHog: http://localhost:8025 (View sent emails here)
 
-2. **Access**
-   - Agent: http://localhost:8000
-   - MailHog: http://localhost:8025 (View sent emails here)
+## How to Verify (Smoke Test)
 
-## Public Exposure (For Mobile Access)
+1.  **Start System**: Run via Docker Compose.
+2.  **Trigger Run**: 
+    ```bash
+    curl -X POST http://localhost:8000/generate-now -u admin:secret
+    ```
+    *(Assuming default basic auth)*
+3.  **Check Email**: Open MailHog (http://localhost:8025). You should see a "Daily X Draft" email.
+4.  **Review**: The email contains the draft and a Policy Report.
+5.  **Approve (Dry Run)**:
+    - Ensure `DRY_RUN=true` in `.env`.
+    - Click "Approve" link in email (or copy link to browser).
+    - You should see "Success" and a fake tweet ID.
+6.  **Verify DB**:
+    - The draft status should be `dry_run_posted`.
 
-To approve tweets from your phone, the `BASE_PUBLIC_URL` in `.env` must be accessible from the internet.
-
-### Option 1: Cloudflare Tunnel (Recommended)
-1. Install `cloudflared`.
-2. Run: `cloudflared tunnel --url http://localhost:8000`
-3. Copy the generated URL (e.g., `https://funny-name.trycloudflare.com`) to `BASE_PUBLIC_URL` in `.env`.
-4. Restart the agent.
-
-### Option 2: VPS + Nginx
-Deploy the Docker container on a VPS and set up Nginx as a reverse proxy with Let's Encrypt SSL.
+## Public Exposure
+To approve from your phone, expose port 8000 via **Cloudflare Tunnel**:
+```bash
+cloudflared tunnel --url http://localhost:8000
+```
+Copy the resulting URL to `BASE_PUBLIC_URL` in `.env` and restart.
 
 ## Development
-
-- **Run Tests**:
-  ```bash
-  pytest tests/
-  ```
-
-- **Project Structure**:
-  - `app/`: Source code.
-  - `app/collector.py`: Git/File data gathering.
-  - `app/llm.py`: OpenRouter interaction.
-  - `app/reviewer.py`: Quality gates.
-  - `app/web.py`: FastAPI endpoints.
-
-## Verification Steps (For Delivery)
-
-1. **Dry Run Mode**:
-   - Ensure `DRY_RUN=true` in `.env`.
-   - Trigger generation: `curl -X POST http://localhost:8000/generate-now -u admin:secret`.
-   - Open MailHog (http://localhost:8025), find the email.
-   - Click "Approve" link.
-   - You should see a success page saying "Tweet posted successfully! ID: ... (Fake)".
-   - The real X API was NOT called.
-
-2. **Live Mode**:
-   - Set `DRY_RUN=false` and provide valid Twitter Credentials.
-   - Repeat steps. The tweet will appear on your profile.
+- **Tests**: `pytest tests/`
+- **DB**: SQLite (`daily_agent.db`)

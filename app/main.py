@@ -2,7 +2,7 @@ import logging
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from app.config import settings
-from app.storage import init_db
+from app.migrations.runner import run_migrations
 from app.scheduler import start_scheduler
 from app.web import router
 
@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     # Startup
     logger.info("Starting Daily X Agent...")
-    init_db()
+    run_migrations()
     start_scheduler()
     yield
     # Shutdown

@@ -10,6 +10,8 @@ twilio
 jinja2
 python-multipart
 pytest
+pytest-env
 httpx
 requests
 python-dotenv
+feedparser
