@@ -28,7 +28,9 @@ class ThreadPlannerAgent(BaseAgent):
 
         should_thread = thread_enabled and (user_force or len(topic_plan.key_points) >= 3)
         if not should_thread:
-            return ThreadPlan(enabled=False, tweets_count=1, numbering_enabled=numbering, reason="single")
+            return ThreadPlan(
+                enabled=False, tweets_count=1, numbering_enabled=numbering, reason="single"
+            )
 
         tweets_count = min(max_tweets, max(2, min(5, len(topic_plan.key_points))))
 

@@ -1,11 +1,10 @@
-import json
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock
 
-from app.database import get_connection
+from sqlalchemy import select
+
 from app.models import (
     AgentLog,
-    ApprovedDraftRecord,
     DraftCandidate,
     DraftCandidates,
     EditedDraft,
@@ -16,10 +15,13 @@ from app.models import (
     TopicPlan,
 )
 from app.orchestrator import orchestrator
+from infrastructure.db import models
+from infrastructure.db import repositories as db
+from infrastructure.db.session import get_sessionmaker
 
 
 def _log(name: str) -> AgentLog:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     return AgentLog(
         agent_name=name,
         start_ts=now,
@@ -31,7 +33,9 @@ def _log(name: str) -> AgentLog:
 
 
 def test_orchestrator_creates_draft(clean_db, monkeypatch):
-    monkeypatch.setattr(orchestrator.collector, "execute", lambda rs: (Materials(), _log("Collector")))
+    monkeypatch.setattr(
+        orchestrator.collector, "execute", lambda rs: (Materials(), _log("Collector"))
+    )
     monkeypatch.setattr(
         orchestrator.curator,
         "execute",
@@ -75,58 +79,51 @@ def test_orchestrator_creates_draft(clean_db, monkeypatch):
             _log("Policy"),
         ),
     )
-    monkeypatch.setattr(orchestrator.notifier, "execute", lambda rec: (MagicMock(), _log("Notifier")))
+    monkeypatch.setattr(
+        orchestrator.notifier, "execute", lambda rec: (MagicMock(), _log("Notifier"))
+    )
 
     run_id = orchestrator.start_run(source="manual")
 
-    conn = get_connection()
-    run = conn.execute("SELECT status FROM runs WHERE run_id=?", (run_id,)).fetchone()
-    draft = conn.execute("SELECT token, status, final_text FROM drafts WHERE run_id=?", (run_id,)).fetchone()
-    conn.close()
+    with get_sessionmaker()() as session:
+        run = db.get_run(session, run_id)
+        draft = session.execute(
+            select(models.Draft).where(models.Draft.run_id == run_id)
+        ).scalar_one_or_none()
 
-    assert run[0] == "completed"
+    assert run is not None
+    assert run.status == "completed"
     assert draft is not None
-    assert draft[1] == "pending"
-    assert draft[2] == "hello"
+    assert draft.status == "pending"
+    assert draft.final_text == "hello"
 
 
 def test_orchestrator_approve_expired(clean_db):
     token = "tok_expired"
-    now = datetime.now(timezone.utc)
-    conn = get_connection()
-    conn.execute(
-        """
-        INSERT INTO drafts (
-            token, run_id, created_at, expires_at, status,
-            token_consumed, thread_enabled,
-            materials_json, topic_plan_json, style_profile_json,
-            candidates_json, edited_draft_json, policy_report_json,
-            final_text
-        ) VALUES (?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            token,
-            "run1",
-            now,
-            now - timedelta(hours=1),
-            "pending",
-            Materials().model_dump_json(),
-            TopicPlan(topic_bucket=1, angles=["a"], key_points=["k"], evidence_map={}).model_dump_json(),
-            StyleProfile().model_dump_json(),
-            DraftCandidates(candidates=[DraftCandidate(mode="single", text="t")]).model_dump_json(),
-            EditedDraft(
+    now = datetime.now(UTC)
+    with get_sessionmaker()() as session:
+        db.create_run(session, run_id="run1", source="test", created_at=now)
+        db.create_draft(
+            session=session,
+            run_id="run1",
+            token=token,
+            created_at=now,
+            expires_at=now - timedelta(hours=1),
+            status="pending",
+            materials=Materials(),
+            topic_plan=TopicPlan(topic_bucket=1, angles=["a"], key_points=["k"], evidence_map={}),
+            style_profile=StyleProfile(),
+            thread_plan=ThreadPlan(enabled=False, tweets_count=1),
+            candidates=DraftCandidates(candidates=[DraftCandidate(mode="single", text="t")]),
+            edited_draft=EditedDraft(
                 mode="single",
                 selected_candidate_index=0,
                 original=DraftCandidate(mode="single", text="t"),
                 final_text="t",
-            ).model_dump_json(),
-            PolicyReport(checks=[], risk_level="LOW", action="PASS").model_dump_json(),
-            "t",
-        ),
-    )
-    conn.commit()
-    conn.close()
+            ),
+            policy_report=PolicyReport(checks=[], risk_level="LOW", action="PASS"),
+        )
+        session.commit()
 
     code, msg = orchestrator.approve_draft(token)
     assert code == 410
-

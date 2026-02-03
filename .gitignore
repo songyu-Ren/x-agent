@@ -8,4 +8,5 @@ __pycache__/
 .trae/
 daily_agent.db
 test_daily_agent.db
+data/
 .DS_Store

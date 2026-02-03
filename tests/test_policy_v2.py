@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from app.agents.policy import PolicyAgent
 from app.models import (
@@ -17,7 +17,7 @@ def test_policy_fact_grounding_maps_evidence():
             EvidenceItem(
                 source_name="git",
                 source_id="abc",
-                timestamp=datetime.now(timezone.utc),
+                timestamp=datetime.now(UTC),
                 raw_snippet="Fix login redirect bug",
                 title="Fix login redirect bug",
             )
@@ -58,4 +58,3 @@ def test_policy_rejects_unsupported_claims():
     assert any(c.check_name == "fact_grounded_ok" and not c.passed for c in report.checks)
     assert report.action in ["REWRITE", "HOLD"]
     assert report.unsupported_claims
-

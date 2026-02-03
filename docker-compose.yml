@@ -1,22 +1,91 @@
 version: '3.8'
 
 services:
-  app:
+  api:
     build: .
-    container_name: daily-x-agent
+    container_name: daily-x-agent-api
     ports:
       - "8000:8000"
     volumes:
       - .:/app
-      - ./daily_agent.db:/app/daily_agent.db
+      - ./data:/app/data
     environment:
       - SMTP_SERVER=mailhog
       - SMTP_PORT=1025
       - ENV=production
+      - LOG_FORMAT=json
+      - DATABASE_URL=postgresql+psycopg://daily_agent:daily_agent@postgres:5432/daily_agent
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - METRICS_ENABLED=true
+      - OTEL_ENABLED=true
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318/v1/traces
     env_file:
       - .env
     depends_on:
+      - postgres
+      - redis
       - mailhog
+      - otel-collector
+
+  worker:
+    build: .
+    container_name: daily-x-agent-worker
+    command: celery -A app.celery_app worker -l info
+    volumes:
+      - .:/app
+      - ./data:/app/data
+    environment:
+      - ENV=production
+      - LOG_FORMAT=json
+      - DATABASE_URL=postgresql+psycopg://daily_agent:daily_agent@postgres:5432/daily_agent
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+    env_file:
+      - .env
+    depends_on:
+      - postgres
+      - redis
+
+  scheduler:
+    build: .
+    container_name: daily-x-agent-scheduler
+    command: celery -A app.celery_app beat -l info
+    volumes:
+      - .:/app
+      - ./data:/app/data
+    environment:
+      - ENV=production
+      - LOG_FORMAT=json
+      - DATABASE_URL=postgresql+psycopg://daily_agent:daily_agent@postgres:5432/daily_agent
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - TIMEZONE=Europe/Amsterdam
+    env_file:
+      - .env
+    depends_on:
+      - redis
+
+  postgres:
+    image: postgres:16
+    container_name: daily-x-agent-postgres
+    environment:
+      - POSTGRES_DB=daily_agent
+      - POSTGRES_USER=daily_agent
+      - POSTGRES_PASSWORD=daily_agent
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    container_name: daily-x-agent-redis
+    ports:
+      - "6379:6379"
 
   mailhog:
     image: mailhog/mailhog
@@ -24,3 +93,24 @@ services:
     ports:
       - "1025:1025"  # SMTP
       - "8025:8025"  # Web UI
+
+  prometheus:
+    image: prom/prometheus:v2.53.3
+    container_name: prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    depends_on:
+      - api
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.102.0
+    container_name: otel-collector
+    ports:
+      - "4318:4318"
+    volumes:
+      - ./deploy/otel/otel-collector-config.yml:/etc/otelcol-contrib/config.yml:ro
+
+volumes:
+  postgres_data:

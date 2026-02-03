@@ -1,0 +1,11 @@
+.venv
+__pycache__
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.git
+.github
+.env
+daily_agent.db
+test_daily_agent.db
+data

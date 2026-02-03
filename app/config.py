@@ -1,6 +1,5 @@
-import os
-from typing import List, Optional
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
 
 class Settings(BaseSettings):
     # General
@@ -8,15 +7,26 @@ class Settings(BaseSettings):
     BASE_PUBLIC_URL: str = "http://localhost:8000"
     SECRET_KEY: str = "unsafe_default_secret"
     LOG_LEVEL: str = "INFO"
+    LOG_FORMAT: str = "json"
+    DB_PATH: str = "daily_agent.db"
+    DATABASE_URL: str | None = None
+
+    ALLOWED_HOSTS: str = "*"
+    CORS_ORIGINS: str = ""
 
     # Scheduler
     SCHEDULE_HOUR: int = 9
     SCHEDULE_MINUTE: int = 0
     TIMEZONE: str = "Europe/Amsterdam"
 
+    # Queue
+    REDIS_URL: str = "redis://localhost:6379/0"
+    CELERY_BROKER_URL: str | None = None
+    CELERY_RESULT_BACKEND: str | None = None
+
     # Auth
-    BASIC_AUTH_USER: Optional[str] = None
-    BASIC_AUTH_PASS: Optional[str] = None
+    BASIC_AUTH_USER: str | None = None
+    BASIC_AUTH_PASS: str | None = None
 
     # Collection
     GIT_REPO_PATH: str = "."
@@ -40,7 +50,15 @@ class Settings(BaseSettings):
     REWRITE_MAX: int = 1
     SIMILARITY_THRESHOLD: float = 0.6
     METRICS_ENABLED: bool = True
+    METRICS_PATH: str = "/metrics"
+    METRICS_INCLUDE_DB: bool = True
     BLOCKED_TERMS_PATH: str = "./blocked_terms.yaml"
+
+    OTEL_ENABLED: bool = False
+    OTEL_SERVICE_NAME: str = "daily-x-agent"
+    OTEL_EXPORTER_OTLP_ENDPOINT: str | None = None
+    OTEL_EXPORTER_OTLP_HEADERS: str = ""
+    OTEL_TRACES_SAMPLER_RATIO: float = 0.1
 
     # Sources (plugins)
     ENABLE_SOURCE_NOTION: bool = False
@@ -68,29 +86,26 @@ class Settings(BaseSettings):
 
     # Email
     EMAIL_PROVIDER: str = "smtp"  # sendgrid or smtp
-    SENDGRID_API_KEY: Optional[str] = None
+    SENDGRID_API_KEY: str | None = None
     SMTP_SERVER: str = "localhost"
     SMTP_PORT: int = 1025
-    SMTP_USERNAME: Optional[str] = None
-    SMTP_PASSWORD: Optional[str] = None
+    SMTP_USERNAME: str | None = None
+    SMTP_PASSWORD: str | None = None
     EMAIL_FROM: str = "daily-agent@example.com"
     EMAIL_TO: str = "me@example.com"
 
     # WhatsApp
     ENABLE_WHATSAPP: bool = False
-    TWILIO_ACCOUNT_SID: Optional[str] = None
-    TWILIO_AUTH_TOKEN: Optional[str] = None
-    TWILIO_FROM_NUMBER: Optional[str] = None
-    TWILIO_TO_NUMBER: Optional[str] = None
+    TWILIO_ACCOUNT_SID: str | None = None
+    TWILIO_AUTH_TOKEN: str | None = None
+    TWILIO_FROM_NUMBER: str | None = None
+    TWILIO_TO_NUMBER: str | None = None
 
-    model_config = SettingsConfigDict(
-        env_file=".env",
-        env_file_encoding="utf-8",
-        extra="ignore"
-    )
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     @property
-    def sensitive_words_list(self) -> List[str]:
+    def sensitive_words_list(self) -> list[str]:
         return [w.strip() for w in self.SENSITIVE_WORDS.split(",") if w.strip()]
+
 
 settings = Settings()

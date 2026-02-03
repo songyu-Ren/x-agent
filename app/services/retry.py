@@ -1,5 +1,6 @@
 import time
-from typing import Callable, TypeVar
+from collections.abc import Callable
+from typing import TypeVar
 
 T = TypeVar("T")
 
@@ -15,4 +16,3 @@ def with_retry(fn: Callable[[], T], max_attempts: int = 3, base_delay_s: float =
             time.sleep(delay)
             delay *= 2
     raise last_exc or RuntimeError("retry_failed")
-

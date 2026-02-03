@@ -1,4 +1,5 @@
 import json
+
 from openai import OpenAI
 
 from app.agents.base import BaseAgent

@@ -1,10 +1,18 @@
 import json
+
 from openai import OpenAI
 
 from app.agents.base import BaseAgent
 from app.config import settings
-from app.models import DraftCandidate, DraftCandidates, Materials, StyleProfile, ThreadPlan, TopicPlan
+from app.models import (
+    DraftCandidates,
+    Materials,
+    StyleProfile,
+    ThreadPlan,
+    TopicPlan,
+)
 from app.services.retry import with_retry
+
 
 class WriterAgent(BaseAgent):
     def __init__(self):
@@ -14,13 +22,18 @@ class WriterAgent(BaseAgent):
             api_key=settings.OPENROUTER_API_KEY,
         )
 
-    def run(self, input_data: tuple[TopicPlan, ThreadPlan, StyleProfile, Materials]) -> DraftCandidates:
+    def run(
+        self, input_data: tuple[TopicPlan, ThreadPlan, StyleProfile, Materials]
+    ) -> DraftCandidates:
         topic_plan, thread_plan, style, materials = input_data
 
         git_subjects = [c.raw_snippet for c in materials.git_commits][:50]
         devlog_text = materials.devlog.raw_snippet if materials.devlog else ""
         notes = [n.raw_snippet for n in materials.notes][:20]
-        links = [f"{l.title or ''} {l.url or ''}".strip() for l in materials.links][:20]
+        links = [
+            f"{link_item.title or ''} {link_item.url or ''}".strip()
+            for link_item in materials.links
+        ][:20]
 
         if not thread_plan.enabled:
             prompt = f"""

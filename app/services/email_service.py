@@ -1,5 +1,6 @@
 import logging
 import smtplib
+from contextlib import suppress
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
@@ -46,8 +47,5 @@ def _send_smtp(subject: str, html: str) -> None:
             server.login(settings.SMTP_USERNAME, settings.SMTP_PASSWORD)
         server.sendmail(settings.EMAIL_FROM, settings.EMAIL_TO, msg.as_string())
     finally:
-        try:
+        with suppress(Exception):
             server.quit()
-        except Exception:
-            pass
-

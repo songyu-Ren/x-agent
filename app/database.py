@@ -1,17 +1,23 @@
 import logging
-import sqlite3
+from collections.abc import Generator
+
+from sqlalchemy.orm import Session
+
+from infrastructure.db.session import get_sessionmaker
 
 logger = logging.getLogger(__name__)
 
-DB_PATH = "daily_agent.db"
 
-def get_connection():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
+def get_session() -> Generator[Session, None, None]:
+    db = get_sessionmaker()()
+    try:
+        yield db
+    finally:
+        db.close()
 
-def init_db():
-    from app.migrations.runner import run_migrations
+
+def init_db() -> None:
+    from infrastructure.db.migrations import run_migrations
 
     run_migrations()
     logger.info("Database ensured via migrations")

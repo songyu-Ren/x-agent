@@ -1,11 +1,18 @@
 import time
+from datetime import UTC, datetime
 
 import tweepy
 
 from app.agents.base import BaseAgent
 from app.config import settings
-from app.database import get_connection
 from app.models import PublishRequest, PublishResult
+from infrastructure.db.repositories import (
+    get_draft_by_token,
+    get_existing_thread_posts,
+    insert_post_idempotent,
+)
+from infrastructure.db.session import get_sessionmaker
+
 
 class PublisherAgent(BaseAgent):
     def __init__(self):
@@ -14,30 +21,42 @@ class PublisherAgent(BaseAgent):
     def run(self, request: PublishRequest) -> PublishResult:
         token = request.token
         tweets = request.tweets
+        with get_sessionmaker()() as session:
+            draft = get_draft_by_token(session, token)
+            if draft is None:
+                raise RuntimeError("Draft not found")
 
-        existing = self._load_existing_thread_posts(token)
-        tweet_ids: list[str] = []
+            existing = get_existing_thread_posts(session, draft)
+            tweet_ids: list[str] = []
 
-        reply_to: str | None = None
-        for idx, text in enumerate(tweets, start=1):
-            if idx in existing:
-                tweet_ids.append(existing[idx])
-                reply_to = existing[idx]
-                continue
+            reply_to: str | None = None
+            for idx, text in enumerate(tweets, start=1):
+                if idx in existing:
+                    tweet_ids.append(existing[idx])
+                    reply_to = existing[idx]
+                    continue
 
-            if request.dry_run or settings.DRY_RUN:
-                fake_id = f"dry_{token[:8]}_{idx}"
-                self._save_thread_post(token, idx, fake_id, text)
-                tweet_ids.append(fake_id)
-                reply_to = fake_id
-                continue
+                if request.dry_run or settings.DRY_RUN:
+                    tweet_id = f"dry_{token[:8]}_{idx}"
+                else:
+                    tweet_id = self._post_with_retry(
+                        text, reply_to if request.reply_chain else None
+                    )
 
-            tweet_id = self._post_with_retry(text, reply_to if request.reply_chain else None)
-            self._save_thread_post(token, idx, tweet_id, text)
-            tweet_ids.append(tweet_id)
-            reply_to = tweet_id
+                insert_post_idempotent(
+                    session=session,
+                    draft=draft,
+                    position=idx,
+                    tweet_id=tweet_id,
+                    content=text,
+                    publish_idempotency_key=f"{token}:{idx}",
+                    posted_at=datetime.now(UTC),
+                )
+                tweet_ids.append(tweet_id)
+                reply_to = tweet_id
 
-        return PublishResult(tweet_ids=tweet_ids)
+            session.commit()
+            return PublishResult(tweet_ids=tweet_ids)
 
     def _client(self) -> tweepy.Client:
         return tweepy.Client(
@@ -66,24 +85,3 @@ class PublisherAgent(BaseAgent):
                 time.sleep(delay)
                 delay *= 2
         raise last_err or RuntimeError("X post failed")
-
-    def _load_existing_thread_posts(self, token: str) -> dict[int, str]:
-        conn = get_connection()
-        rows = conn.execute(
-            "SELECT position, tweet_id FROM thread_posts WHERE draft_token = ? ORDER BY position ASC",
-            (token,),
-        ).fetchall()
-        conn.close()
-        return {int(r[0]): str(r[1]) for r in rows}
-
-    def _save_thread_post(self, token: str, position: int, tweet_id: str, content: str) -> None:
-        conn = get_connection()
-        conn.execute(
-            """
-            INSERT OR IGNORE INTO thread_posts (draft_token, position, tweet_id, content, posted_at)
-            VALUES (?, ?, ?, ?, datetime('now'))
-            """,
-            (token, position, tweet_id, content),
-        )
-        conn.commit()
-        conn.close()

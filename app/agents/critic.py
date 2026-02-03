@@ -4,8 +4,15 @@ from openai import OpenAI
 
 from app.agents.base import BaseAgent
 from app.config import settings
-from app.models import DraftCandidate, DraftCandidates, EditedDraft, Materials, StyleProfile, ThreadPlan
+from app.models import (
+    DraftCandidates,
+    EditedDraft,
+    Materials,
+    StyleProfile,
+    ThreadPlan,
+)
 from app.services.retry import with_retry
+
 
 class CriticAgent(BaseAgent):
     def __init__(self):
@@ -15,7 +22,9 @@ class CriticAgent(BaseAgent):
             api_key=settings.OPENROUTER_API_KEY,
         )
 
-    def run(self, input_data: tuple[DraftCandidates, Materials, StyleProfile, ThreadPlan]) -> EditedDraft:
+    def run(
+        self, input_data: tuple[DraftCandidates, Materials, StyleProfile, ThreadPlan]
+    ) -> EditedDraft:
         candidates, materials, style, thread_plan = input_data
 
         prompt = f"""
@@ -46,7 +55,7 @@ Return JSON only:
   "mode": "single"|"thread",
   "selected_candidate_index": 0,
   "original": {{...}},
-  "final_text": "...",  
+  "final_text": "...",
   "final_tweets": ["..."],
   "numbering_added": false,
   "edit_notes": "..."

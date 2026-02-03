@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
-from typing import List
+from datetime import UTC, datetime, timedelta
 
 import requests
 
@@ -13,13 +12,13 @@ from app.sources.base import SourcePlugin
 class NotionSource(SourcePlugin):
     name = "notion"
 
-    def fetch(self) -> List[EvidenceItem]:
+    def fetch(self) -> list[EvidenceItem]:
         api_key = getattr(settings, "NOTION_API_KEY", None)
         db_id = getattr(settings, "NOTION_DB_ID", None)
         if not api_key or not db_id:
             raise RuntimeError("NOTION_API_KEY or NOTION_DB_ID not configured")
 
-        since = datetime.now(timezone.utc) - timedelta(hours=24)
+        since = datetime.now(UTC) - timedelta(hours=24)
 
         headers = {
             "Authorization": f"Bearer {api_key}",
@@ -42,7 +41,7 @@ class NotionSource(SourcePlugin):
         data = resp.json()
         results = data.get("results", [])
 
-        items: List[EvidenceItem] = []
+        items: list[EvidenceItem] = []
         for page in results:
             last_edited = _parse_dt(page.get("last_edited_time"))
             if last_edited and last_edited < since:
@@ -55,7 +54,7 @@ class NotionSource(SourcePlugin):
                 EvidenceItem(
                     source_name=self.name,
                     source_id=str(page_id),
-                    timestamp=last_edited or datetime.now(timezone.utc),
+                    timestamp=last_edited or datetime.now(UTC),
                     raw_snippet=snippet,
                     title=title,
                     url=url,
@@ -81,4 +80,3 @@ def _extract_title(page: dict) -> str:
             if title_arr:
                 return "".join([t.get("plain_text", "") for t in title_arr]).strip()
     return "(untitled)"
-

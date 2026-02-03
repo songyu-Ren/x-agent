@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
-from typing import List
+from datetime import UTC, datetime, timedelta
 
 import feedparser
 
@@ -13,19 +12,19 @@ from app.sources.base import SourcePlugin
 class RSSSource(SourcePlugin):
     name = "rss"
 
-    def fetch(self) -> List[EvidenceItem]:
+    def fetch(self) -> list[EvidenceItem]:
         urls = getattr(settings, "RSS_FEED_URLS", "")
         feed_urls = [u.strip() for u in urls.split(",") if u.strip()]
         if not feed_urls:
             raise RuntimeError("RSS_FEED_URLS not configured")
 
-        since = datetime.now(timezone.utc) - timedelta(hours=24)
-        items: List[EvidenceItem] = []
+        since = datetime.now(UTC) - timedelta(hours=24)
+        items: list[EvidenceItem] = []
 
         for url in feed_urls:
             feed = feedparser.parse(url)
             for entry in feed.entries[:30]:
-                published = _entry_datetime(entry) or datetime.now(timezone.utc)
+                published = _entry_datetime(entry) or datetime.now(UTC)
                 if published < since:
                     continue
                 title = getattr(entry, "title", "")
@@ -51,8 +50,15 @@ def _entry_datetime(entry) -> datetime | None:
         value = getattr(entry, attr, None)
         if value:
             try:
-                return datetime(*value[:6], tzinfo=timezone.utc)
+                return datetime(
+                    value.tm_year,
+                    value.tm_mon,
+                    value.tm_mday,
+                    value.tm_hour,
+                    value.tm_min,
+                    value.tm_sec,
+                    tzinfo=UTC,
+                )
             except Exception:
                 pass
     return None
-

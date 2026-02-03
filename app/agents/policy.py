@@ -1,5 +1,4 @@
 import re
-from typing import Dict, List, Tuple
 
 import yaml
 
@@ -22,19 +21,23 @@ class PolicyAgent(BaseAgent):
 
     def run(
         self,
-        input_data: tuple[EditedDraft, Materials, List[str], StyleProfile],
+        input_data: tuple[EditedDraft, Materials, list[str], StyleProfile],
     ) -> PolicyReport:
         edited, materials, recent_posts, style = input_data
 
         tweets = _edited_to_tweets(edited)
-        blocked_terms = _load_blocked_terms(getattr(settings, "BLOCKED_TERMS_PATH", "./blocked_terms.yaml"))
+        blocked_terms = _load_blocked_terms(
+            getattr(settings, "BLOCKED_TERMS_PATH", "./blocked_terms.yaml")
+        )
         similarity_threshold = float(getattr(settings, "SIMILARITY_THRESHOLD", 0.6) or 0.6)
 
         checks: list[PolicyCheckResult] = []
         offending_spans: list[str] = []
 
         length_ok, length_details = _check_length(tweets)
-        checks.append(PolicyCheckResult(check_name="length_ok", passed=length_ok, details=length_details))
+        checks.append(
+            PolicyCheckResult(check_name="length_ok", passed=length_ok, details=length_details)
+        )
 
         sensitive_ok, sensitive_hits = _check_blocked_terms(tweets, blocked_terms)
         checks.append(
@@ -47,7 +50,9 @@ class PolicyAgent(BaseAgent):
         offending_spans.extend(sensitive_hits)
 
         similarity_ok, sim_details = _check_similarity(tweets, recent_posts, similarity_threshold)
-        checks.append(PolicyCheckResult(check_name="similarity_ok", passed=similarity_ok, details=sim_details))
+        checks.append(
+            PolicyCheckResult(check_name="similarity_ok", passed=similarity_ok, details=sim_details)
+        )
 
         thread_marker_ok, thread_details = _check_thread_markers(edited, tweets)
         checks.append(
@@ -114,7 +119,7 @@ def _check_length(tweets: list[str]) -> tuple[bool, str]:
 
 def _load_blocked_terms(path: str) -> list[str]:
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             data = yaml.safe_load(f) or {}
         terms = data.get("blocked_terms", [])
         return [str(t).strip().lower() for t in terms if str(t).strip()]
@@ -134,7 +139,7 @@ def _check_blocked_terms(tweets: list[str], blocked_terms: list[str]) -> tuple[b
 
 def _tokenize(text: str) -> set[str]:
     words = re.findall(r"[A-Za-z0-9_]+", text.lower())
-    return set(w for w in words if len(w) >= 3)
+    return {w for w in words if len(w) >= 3}
 
 
 def _jaccard(a: set[str], b: set[str]) -> float:
@@ -145,7 +150,9 @@ def _jaccard(a: set[str], b: set[str]) -> float:
     return inter / union if union else 0.0
 
 
-def _check_similarity(tweets: list[str], recent_posts: list[str], threshold: float) -> tuple[bool, str]:
+def _check_similarity(
+    tweets: list[str], recent_posts: list[str], threshold: float
+) -> tuple[bool, str]:
     if not recent_posts:
         return True, "no_recent_posts"
     worst = 0.0
@@ -167,7 +174,7 @@ def _check_thread_markers(edited: EditedDraft, tweets: list[str]) -> tuple[bool,
 
 
 def _check_tone(tweets: list[str], style: StyleProfile) -> tuple[bool, str]:
-    forbidden = set([p.lower() for p in style.forbidden_phrases])
+    forbidden = {p.lower() for p in style.forbidden_phrases}
     marketing = ["game changer", "revolutionary", "explosive growth", "world changing"]
     forbidden |= set(marketing)
     if any("#" in t for t in tweets):
@@ -229,9 +236,11 @@ def _materials_evidence(materials: Materials) -> list[EvidenceItem]:
     return ev
 
 
-def _map_evidence(claims: list[str], materials: Materials) -> tuple[Dict[str, List[EvidenceRef]], list[str]]:
+def _map_evidence(
+    claims: list[str], materials: Materials
+) -> tuple[dict[str, list[EvidenceRef]], list[str]]:
     evidence_items = _materials_evidence(materials)
-    evidence_map: Dict[str, List[EvidenceRef]] = {}
+    evidence_map: dict[str, list[EvidenceRef]] = {}
     unsupported: list[str] = []
     for claim in claims:
         cset = _tokenize(claim)
@@ -268,4 +277,3 @@ def _decide_action(failures: list[PolicyCheckResult]) -> tuple[str, str]:
     if "length_ok" in names or "similarity_ok" in names or "tone_ok" in names:
         return "REWRITE", "MEDIUM"
     return "HOLD", "HIGH"
-

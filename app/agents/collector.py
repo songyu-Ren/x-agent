@@ -1,6 +1,6 @@
 import os
 import subprocess
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from app.agents.base import BaseAgent
 from app.config import settings
@@ -8,6 +8,7 @@ from app.models import EvidenceItem, Materials, RunState
 from app.sources.github_source import GitHubSource
 from app.sources.notion_source import NotionSource
 from app.sources.rss_source import RSSSource
+
 
 class CollectorAgent(BaseAgent):
     def __init__(self):
@@ -54,7 +55,7 @@ class CollectorAgent(BaseAgent):
                 "--pretty=format:%H|%ct|%s",
             ]
             result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-            lines = [l.strip() for l in result.stdout.splitlines() if l.strip()]
+            lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
             items: list[EvidenceItem] = []
             for line in lines:
                 parts = line.split("|", 2)
@@ -62,9 +63,9 @@ class CollectorAgent(BaseAgent):
                     continue
                 commit_hash, epoch_s, subject = parts
                 try:
-                    ts = datetime.fromtimestamp(int(epoch_s), tz=timezone.utc)
+                    ts = datetime.fromtimestamp(int(epoch_s), tz=UTC)
                 except Exception:
-                    ts = datetime.now(timezone.utc)
+                    ts = datetime.now(UTC)
                 items.append(
                     EvidenceItem(
                         source_name="git",
@@ -82,13 +83,13 @@ class CollectorAgent(BaseAgent):
         try:
             if not os.path.exists(file_path):
                 return None
-            with open(file_path, "r", encoding="utf-8") as f:
+            with open(file_path, encoding="utf-8") as f:
                 f.seek(0, os.SEEK_END)
                 size = f.tell()
                 start = max(0, size - char_limit)
                 f.seek(start)
                 content = f.read().strip()
-            mtime = datetime.fromtimestamp(os.path.getmtime(file_path), tz=timezone.utc)
+            mtime = datetime.fromtimestamp(os.path.getmtime(file_path), tz=UTC)
             return EvidenceItem(
                 source_name="devlog",
                 source_id=os.path.abspath(file_path),

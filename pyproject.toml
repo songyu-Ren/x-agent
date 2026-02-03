@@ -1,0 +1,56 @@
+[tool.black]
+line-length = 100
+target-version = ["py311"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+extend-exclude = [".venv", "daily_agent.db", "test_daily_agent.db"]
+
+[tool.ruff.lint]
+select = [
+  "E",
+  "F",
+  "W",
+  "I",
+  "B",
+  "UP",
+  "SIM",
+  "C4",
+  "PIE",
+  "RUF",
+]
+ignore = [
+  "E501",
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["app", "domain", "application", "infrastructure", "interfaces"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.mypy]
+python_version = "3.11"
+warn_unused_configs = true
+no_implicit_optional = true
+warn_return_any = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_unreachable = true
+strict_equality = true
+show_error_codes = true
+
+[[tool.mypy.overrides]]
+module = [
+  "apscheduler.*",
+  "celery.*",
+  "openai.*",
+  "tweepy.*",
+  "sendgrid.*",
+  "twilio.*",
+  "feedparser.*",
+  "prometheus_client.*",
+  "opentelemetry.*",
+]
+ignore_missing_imports = true

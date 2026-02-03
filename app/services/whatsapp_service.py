@@ -19,4 +19,3 @@ def _send(body: str) -> None:
         to=settings.TWILIO_TO_NUMBER,
         body=body,
     )
-
