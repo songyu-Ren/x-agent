@@ -18,7 +18,12 @@ def setup_test_db():
 @pytest.fixture
 def clean_db():
     with get_sessionmaker()() as session:
+        session.execute(delete(models.AuditLog))
+        session.execute(delete(models.UserSession))
+        session.execute(delete(models.User))
         session.execute(delete(models.Post))
+        session.execute(delete(models.ActionToken))
+        session.execute(delete(models.PublishAttempt))
         session.execute(delete(models.PolicyReport))
         session.execute(delete(models.AgentLog))
         session.execute(delete(models.Draft))

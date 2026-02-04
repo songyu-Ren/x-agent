@@ -21,12 +21,14 @@ from infrastructure.db.session import get_sessionmaker
 
 def test_publisher_idempotent_thread_dry_run(clean_db):
     now = datetime.now(UTC)
+    draft_id = "draft1"
     with get_sessionmaker()() as session:
         db.create_run(session, run_id="run1", source="test", created_at=now)
         db.create_draft(
             session=session,
             run_id="run1",
-            token="tok123",
+            draft_id=draft_id,
+            token_hash="0" * 64,
             created_at=now,
             expires_at=now + timedelta(hours=1),
             status="pending",
@@ -49,7 +51,7 @@ def test_publisher_idempotent_thread_dry_run(clean_db):
         session.commit()
 
     agent = PublisherAgent()
-    req = PublishRequest(token="tok123", tweets=["t1", "t2", "t3"], dry_run=True)
+    req = PublishRequest(draft_id=draft_id, tweets=["t1", "t2", "t3"], dry_run=True)
 
     r1 = agent.run(req)
     r2 = agent.run(req)
@@ -57,7 +59,7 @@ def test_publisher_idempotent_thread_dry_run(clean_db):
     assert r1.tweet_ids == r2.tweet_ids
 
     with get_sessionmaker()() as session:
-        draft = db.get_draft_by_token(session, "tok123")
+        draft = db.get_draft(session, draft_id)
         assert draft is not None
         rows = session.execute(
             select(models.Post.position, models.Post.tweet_id)

@@ -110,7 +110,11 @@ class PolicyReport(BaseModel):
 
 
 class ApprovedDraftRecord(BaseModel):
-    token: str
+    draft_id: str
+    approve_token: str
+    edit_token: str
+    skip_token: str
+    view_token: str
     mode: str
     text: str | None = None
     tweets: list[str] | None = None
@@ -124,7 +128,7 @@ class NotificationResult(BaseModel):
 
 
 class PublishRequest(BaseModel):
-    token: str
+    draft_id: str
     tweets: list[str]
     dry_run: bool
     reply_chain: bool = True

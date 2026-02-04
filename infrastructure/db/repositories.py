@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import hashlib
+import secrets
 import uuid
 from datetime import UTC, datetime, timedelta
 
+import bcrypt
 from sqlalchemy import Select, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -21,6 +24,12 @@ from domain.models import (
     WeeklyReport,
 )
 from infrastructure.db import models
+
+
+def _as_utc_aware(dt: datetime) -> datetime:
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=UTC)
+    return dt
 
 
 def get_run(session: Session, run_id: str) -> models.Run | None:
@@ -70,7 +79,8 @@ def add_agent_log(session: Session, run_id: str, log: AgentLogModel) -> None:
 def create_draft(
     session: Session,
     run_id: str,
-    token: str,
+    draft_id: str,
+    token_hash: str,
     created_at: datetime,
     expires_at: datetime,
     status: str,
@@ -82,16 +92,15 @@ def create_draft(
     edited_draft: EditedDraft,
     policy_report: PolicyReport,
 ) -> models.Draft:
-    existing = get_draft_by_token(session, token)
+    existing = session.get(models.Draft, draft_id)
     if existing is not None:
         return existing
-    draft_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"draft_id:{token}"))
     thread_plan_json = thread_plan.model_dump(mode="json") if thread_plan else None
     tweets_json = edited_draft.final_tweets if edited_draft.mode == "thread" else None
     final_text = edited_draft.final_text or (tweets_json[0] if tweets_json else "")
     d = models.Draft(
         id=draft_id,
-        token=token,
+        token=token_hash,
         run_id=run_id,
         created_at=created_at,
         expires_at=expires_at,
@@ -124,9 +133,8 @@ def create_draft(
     return d
 
 
-def get_draft_by_token(session: Session, token: str) -> models.Draft | None:
-    stmt: Select[tuple[models.Draft]] = select(models.Draft).where(models.Draft.token == token)
-    return session.execute(stmt).scalar_one_or_none()
+def get_draft(session: Session, draft_id: str) -> models.Draft | None:
+    return session.get(models.Draft, draft_id)
 
 
 def list_drafts(
@@ -134,7 +142,7 @@ def list_drafts(
 ) -> list[tuple[str, datetime, str, str]]:
     stmt = (
         select(
-            models.Draft.token,
+            models.Draft.id,
             models.Draft.created_at,
             models.Draft.status,
             models.Draft.final_text,
@@ -199,6 +207,133 @@ def mark_draft_skipped(session: Session, draft: models.Draft) -> None:
     draft.status = "skipped"
     draft.token_consumed = True
     draft.consumed_at = datetime.now(UTC)
+
+
+def hash_action_token(raw_token: str) -> str:
+    return hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+
+
+def issue_action_token(
+    session: Session,
+    draft: models.Draft,
+    action: str,
+    ttl_seconds: int,
+    one_time: bool,
+    created_at: datetime | None = None,
+) -> str:
+    now = created_at or datetime.now(UTC)
+    expires_at = now + timedelta(seconds=ttl_seconds)
+    while True:
+        raw_token = secrets.token_urlsafe(32)
+        token_hash = hash_action_token(raw_token)
+        try:
+            session.add(
+                models.ActionToken(
+                    draft_id=draft.id,
+                    action=action,
+                    token_hash=token_hash,
+                    created_at=now,
+                    expires_at=expires_at,
+                    one_time=one_time,
+                    consumed_at=None,
+                )
+            )
+            session.flush()
+            return raw_token
+        except IntegrityError:
+            session.rollback()
+
+
+def get_action_token(session: Session, action: str, raw_token: str) -> models.ActionToken | None:
+    token_hash = hash_action_token(raw_token)
+    stmt: Select[tuple[models.ActionToken]] = select(models.ActionToken).where(
+        models.ActionToken.action == action,
+        models.ActionToken.token_hash == token_hash,
+    )
+    return session.execute(stmt).scalar_one_or_none()
+
+
+def resolve_action_token(
+    session: Session, action: str, raw_token: str, now: datetime | None = None
+) -> tuple[models.Draft | None, models.ActionToken | None, str]:
+    now = _as_utc_aware(now or datetime.now(UTC))
+    token_row = get_action_token(session, action=action, raw_token=raw_token)
+    if token_row is None:
+        return None, None, "not_found"
+    if now > _as_utc_aware(token_row.expires_at):
+        return None, token_row, "expired"
+    if token_row.one_time and token_row.consumed_at is not None:
+        return None, token_row, "consumed"
+    draft = session.get(models.Draft, token_row.draft_id)
+    if draft is None:
+        return None, token_row, "not_found"
+    return draft, token_row, "ok"
+
+
+def consume_action_token(
+    session: Session, token_row: models.ActionToken, consumed_at: datetime | None = None
+) -> None:
+    if token_row.one_time and token_row.consumed_at is None:
+        token_row.consumed_at = consumed_at or datetime.now(UTC)
+        session.add(token_row)
+
+
+def get_publish_attempt(
+    session: Session, draft_id: str, attempt: int = 1
+) -> models.PublishAttempt | None:
+    stmt: Select[tuple[models.PublishAttempt]] = select(models.PublishAttempt).where(
+        models.PublishAttempt.draft_id == draft_id,
+        models.PublishAttempt.attempt == attempt,
+    )
+    return session.execute(stmt).scalar_one_or_none()
+
+
+def try_start_publish_attempt(
+    session: Session,
+    draft: models.Draft,
+    attempt: int,
+    owner: str | None,
+    created_at: datetime | None = None,
+) -> tuple[bool, models.PublishAttempt | None]:
+    publish_attempt = models.PublishAttempt(
+        draft_id=draft.id,
+        attempt=attempt,
+        owner=owner,
+        status="started",
+        created_at=created_at or datetime.now(UTC),
+        completed_at=None,
+        last_error=None,
+    )
+    try:
+        session.add(publish_attempt)
+        session.flush()
+        return True, publish_attempt
+    except IntegrityError:
+        session.rollback()
+        return False, get_publish_attempt(session, draft.id, attempt=attempt)
+
+
+def mark_publish_attempt_completed(
+    session: Session,
+    publish_attempt: models.PublishAttempt,
+    completed_at: datetime | None = None,
+) -> None:
+    publish_attempt.status = "completed"
+    publish_attempt.completed_at = completed_at or datetime.now(UTC)
+    publish_attempt.last_error = None
+    session.add(publish_attempt)
+
+
+def mark_publish_attempt_failed(
+    session: Session,
+    publish_attempt: models.PublishAttempt,
+    error: str,
+    completed_at: datetime | None = None,
+) -> None:
+    publish_attempt.status = "failed"
+    publish_attempt.completed_at = completed_at or datetime.now(UTC)
+    publish_attempt.last_error = error[:500]
+    session.add(publish_attempt)
 
 
 def insert_post_idempotent(
@@ -308,3 +443,117 @@ def avg_run_duration_ms(session: Session) -> float:
     stmt = select(func.avg(models.Run.duration_ms)).where(models.Run.duration_ms.is_not(None))
     value = session.execute(stmt).scalar_one()
     return float(value or 0.0)
+
+
+def hash_password(raw_password: str) -> str:
+    hashed = bcrypt.hashpw(raw_password.encode("utf-8"), bcrypt.gensalt(rounds=12))
+    return hashed.decode("utf-8")
+
+
+def verify_password(raw_password: str, password_hash: str) -> bool:
+    try:
+        return bcrypt.checkpw(raw_password.encode("utf-8"), password_hash.encode("utf-8"))
+    except Exception:
+        return False
+
+
+def get_user_by_username(session: Session, username: str) -> models.User | None:
+    stmt: Select[tuple[models.User]] = select(models.User).where(models.User.username == username)
+    return session.execute(stmt).scalar_one_or_none()
+
+
+def get_user(session: Session, user_id: str) -> models.User | None:
+    return session.get(models.User, user_id)
+
+
+def ensure_user(
+    session: Session,
+    *,
+    username: str,
+    raw_password: str,
+    role: str,
+    created_at: datetime | None = None,
+) -> models.User:
+    existing = get_user_by_username(session, username)
+    if existing is not None:
+        return existing
+    now = created_at or datetime.now(UTC)
+    user = models.User(
+        id=str(uuid.uuid4()),
+        username=username,
+        password_hash=hash_password(raw_password),
+        role=role,
+        created_at=now,
+    )
+    session.add(user)
+    session.flush()
+    return user
+
+
+def create_user_session(
+    session: Session,
+    *,
+    session_id: str,
+    user_id: str,
+    csrf_token: str,
+    created_at: datetime,
+    expires_at: datetime,
+    ip_address: str | None,
+    user_agent: str | None,
+) -> None:
+    session.add(
+        models.UserSession(
+            id=session_id,
+            user_id=user_id,
+            csrf_token=csrf_token,
+            created_at=created_at,
+            expires_at=expires_at,
+            last_seen_at=created_at,
+            ip_address=ip_address,
+            user_agent=user_agent[:200] if user_agent else None,
+        )
+    )
+
+
+def get_user_session(
+    session: Session, session_id: str, now: datetime | None = None
+) -> models.UserSession | None:
+    now = _as_utc_aware(now or datetime.now(UTC))
+    row = session.get(models.UserSession, session_id)
+    if row is None:
+        return None
+    if now > _as_utc_aware(row.expires_at):
+        session.delete(row)
+        session.flush()
+        return None
+    row.last_seen_at = now
+    session.add(row)
+    return row
+
+
+def delete_user_session(session: Session, session_id: str) -> None:
+    row = session.get(models.UserSession, session_id)
+    if row is not None:
+        session.delete(row)
+
+
+def add_audit_log(
+    session: Session,
+    *,
+    user_id: str,
+    action: str,
+    draft_id: str | None,
+    details: dict,
+    ip_address: str | None,
+    created_at: datetime | None = None,
+) -> None:
+    session.add(
+        models.AuditLog(
+            user_id=user_id,
+            action=action[:50],
+            draft_id=draft_id,
+            created_at=created_at or datetime.now(UTC),
+            ip_address=ip_address,
+            details_json=details,
+        )
+    )

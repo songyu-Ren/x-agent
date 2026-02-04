@@ -27,6 +27,11 @@ class Settings(BaseSettings):
     # Auth
     BASIC_AUTH_USER: str | None = None
     BASIC_AUTH_PASS: str | None = None
+    ADMIN_USERNAME: str | None = None
+    ADMIN_PASSWORD: str | None = None
+    SESSION_TTL_HOURS: int = 24
+    RATE_LIMIT_AUTH_PER_MIN: int = 10
+    RATE_LIMIT_ACTION_PER_MIN: int = 60
 
     # Collection
     GIT_REPO_PATH: str = "."

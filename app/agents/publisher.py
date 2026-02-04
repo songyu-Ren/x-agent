@@ -7,7 +7,7 @@ from app.agents.base import BaseAgent
 from app.config import settings
 from app.models import PublishRequest, PublishResult
 from infrastructure.db.repositories import (
-    get_draft_by_token,
+    get_draft,
     get_existing_thread_posts,
     insert_post_idempotent,
 )
@@ -19,10 +19,10 @@ class PublisherAgent(BaseAgent):
         super().__init__("PublisherAgent")
 
     def run(self, request: PublishRequest) -> PublishResult:
-        token = request.token
+        draft_id = request.draft_id
         tweets = request.tweets
         with get_sessionmaker()() as session:
-            draft = get_draft_by_token(session, token)
+            draft = get_draft(session, draft_id)
             if draft is None:
                 raise RuntimeError("Draft not found")
 
@@ -37,7 +37,7 @@ class PublisherAgent(BaseAgent):
                     continue
 
                 if request.dry_run or settings.DRY_RUN:
-                    tweet_id = f"dry_{token[:8]}_{idx}"
+                    tweet_id = f"dry_{draft_id[:8]}_{idx}"
                 else:
                     tweet_id = self._post_with_retry(
                         text, reply_to if request.reply_chain else None
@@ -49,7 +49,7 @@ class PublisherAgent(BaseAgent):
                     position=idx,
                     tweet_id=tweet_id,
                     content=text,
-                    publish_idempotency_key=f"{token}:{idx}",
+                    publish_idempotency_key=f"{draft_id}:{idx}",
                     posted_at=datetime.now(UTC),
                 )
                 tweet_ids.append(tweet_id)

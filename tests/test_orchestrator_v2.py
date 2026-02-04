@@ -99,14 +99,14 @@ def test_orchestrator_creates_draft(clean_db, monkeypatch):
 
 
 def test_orchestrator_approve_expired(clean_db):
-    token = "tok_expired"
     now = datetime.now(UTC)
     with get_sessionmaker()() as session:
         db.create_run(session, run_id="run1", source="test", created_at=now)
-        db.create_draft(
+        draft = db.create_draft(
             session=session,
             run_id="run1",
-            token=token,
+            draft_id="draft_expired",
+            token_hash="1" * 64,
             created_at=now,
             expires_at=now - timedelta(hours=1),
             status="pending",
@@ -123,7 +123,10 @@ def test_orchestrator_approve_expired(clean_db):
             ),
             policy_report=PolicyReport(checks=[], risk_level="LOW", action="PASS"),
         )
+        approve_token = db.issue_action_token(
+            session=session, draft=draft, action="approve", ttl_seconds=0, one_time=True
+        )
         session.commit()
 
-    code, msg = orchestrator.approve_draft(token)
+    code, msg = orchestrator.approve_draft(approve_token)
     assert code == 410

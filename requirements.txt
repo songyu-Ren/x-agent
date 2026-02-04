@@ -19,6 +19,7 @@ pytest-env
 httpx
 requests
 python-dotenv
+bcrypt
 prometheus-client
 opentelemetry-api
 opentelemetry-sdk

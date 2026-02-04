@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import secrets
 import uuid
 from datetime import UTC, datetime, timedelta
 
@@ -112,8 +113,16 @@ class Orchestrator:
 
     def approve_draft(self, token: str) -> tuple[int, str]:
         with get_sessionmaker()() as session:
-            draft = db.get_draft_by_token(session, token)
-            if draft is None:
+            draft, token_row, token_status = db.resolve_action_token(
+                session=session, action="approve", raw_token=token
+            )
+            if token_status == "not_found":
+                return 404, "Token not found"
+            if token_status == "expired":
+                return 410, "Token expired"
+            if token_status == "consumed":
+                return 200, "Already processed"
+            if draft is None or token_row is None:
                 return 404, "Token not found"
 
             if draft.token_consumed:
@@ -138,6 +147,42 @@ class Orchestrator:
         if report.action != "PASS":
             return 403, "Policy check failed"
 
+        publish_owner = str(uuid.uuid4())
+        draft_id: str
+        with get_sessionmaker()() as session:
+            draft, token_row, token_status = db.resolve_action_token(
+                session=session, action="approve", raw_token=token
+            )
+            if token_status == "not_found":
+                return 404, "Token not found"
+            if token_status == "expired":
+                return 410, "Token expired"
+            if token_status == "consumed":
+                return 200, "Already processed"
+            if draft is None or token_row is None:
+                return 404, "Token not found"
+            if draft.token_consumed:
+                return 200, f"Already processed: {draft.status}"
+            if _is_expired(draft.expires_at):
+                return 410, "Token expired"
+
+            draft_id = draft.id
+            started, attempt_row = db.try_start_publish_attempt(
+                session=session, draft=draft, attempt=1, owner=publish_owner
+            )
+            if not started:
+                if attempt_row is None:
+                    return 409, "Publish already started"
+                if attempt_row.status == "completed":
+                    return 200, f"Already processed: {draft.status}"
+                if attempt_row.status == "failed":
+                    return 409, "Previous publish attempt failed; use resume action"
+                return 200, "Publish already in progress"
+
+            draft.status = "publishing"
+            db.consume_action_token(session, token_row)
+            session.commit()
+
         if edited_draft.mode == "thread":
             tweets = list(
                 edited_draft.final_tweets
@@ -148,7 +193,7 @@ class Orchestrator:
         tweets = [t for t in tweets if t]
 
         publish_req = PublishRequest(
-            token=token, tweets=tweets, dry_run=bool(settings.DRY_RUN), reply_chain=True
+            draft_id=draft_id, tweets=tweets, dry_run=bool(settings.DRY_RUN), reply_chain=True
         )
 
         try:
@@ -157,30 +202,65 @@ class Orchestrator:
             new_status = "dry_run_posted" if settings.DRY_RUN else "posted"
 
             with get_sessionmaker()() as session:
-                draft = db.get_draft_by_token(session, token)
-                if draft is None:
-                    return 404, "Token not found"
+                draft_row = db.get_draft(session, draft_id)
+                if draft_row is None:
+                    return 404, "Draft not found"
+                attempt_row = db.get_publish_attempt(session, draft_id, attempt=1)
                 db.mark_draft_consumed(
                     session=session,
-                    draft=draft,
+                    draft=draft_row,
                     status=new_status,
                     published_tweet_ids=tweet_ids,
-                    approval_idempotency_key=f"approve:{token}",
+                    approval_idempotency_key=f"approve:{draft_id}",
                 )
+                if attempt_row is not None:
+                    db.mark_publish_attempt_completed(session, attempt_row)
                 session.commit()
             return 200, f"Published: {tweet_ids}"
         except Exception as e:
             with get_sessionmaker()() as session:
-                draft = db.get_draft_by_token(session, token)
-                if draft is not None:
-                    draft.status = "error"
-                    draft.last_error = str(e)[:500]
+                draft_row = db.get_draft(session, draft_id)
+                if draft_row is not None:
+                    attempt_row = db.get_publish_attempt(session, draft_id, attempt=1)
+                    draft_row.status = "error"
+                    draft_row.last_error = str(e)[:500]
+                    if attempt_row is not None:
+                        db.mark_publish_attempt_failed(session, attempt_row, error=str(e))
                     session.commit()
             return 500, "Publish failed"
 
     def save_edit(self, token: str, new_texts: list[str]) -> tuple[int, PolicyReport]:
         with get_sessionmaker()() as session:
-            draft = db.get_draft_by_token(session, token)
+            draft, _, token_status = db.resolve_action_token(
+                session=session, action="edit", raw_token=token
+            )
+            if token_status == "not_found" or draft is None:
+                raise RuntimeError("Not found")
+            if token_status == "expired":
+                raise RuntimeError("Expired")
+            if _is_expired(draft.expires_at):
+                raise RuntimeError("Expired")
+            if draft.token_consumed:
+                raise RuntimeError("Token consumed")
+
+            materials = Materials(**draft.materials_json)
+            style = StyleProfile(**draft.style_profile_json)
+            recent_posts = db.get_recent_posts(session, days=14)
+            edited = EditedDraft(**draft.edited_draft_json)
+
+            db.update_draft_texts(session, draft, new_texts)
+            edited.final_text = draft.final_text or ""
+            edited.final_tweets = list(draft.tweets_json or []) if draft.thread_enabled else None
+            draft.edited_draft_json = edited.model_dump(mode="json")
+            session.commit()
+
+        report, _ = self.policy.execute((edited, materials, recent_posts, style))
+        self._update_policy_report(draft.id, report)
+        return 200, report
+
+    def save_edit_by_id(self, draft_id: str, new_texts: list[str]) -> tuple[int, PolicyReport]:
+        with get_sessionmaker()() as session:
+            draft = db.get_draft(session, draft_id)
             if draft is None:
                 raise RuntimeError("Not found")
             if _is_expired(draft.expires_at):
@@ -200,14 +280,18 @@ class Orchestrator:
             session.commit()
 
         report, _ = self.policy.execute((edited, materials, recent_posts, style))
-        self._update_policy_report(token, report)
+        self._update_policy_report(draft_id, report)
         return 200, report
 
     def regenerate(self, token: str) -> tuple[int, str]:
         with get_sessionmaker()() as session:
-            draft = db.get_draft_by_token(session, token)
-            if draft is None:
+            draft, _, token_status = db.resolve_action_token(
+                session=session, action="regenerate", raw_token=token
+            )
+            if token_status == "not_found" or draft is None:
                 return 404, "Not found"
+            if token_status == "expired":
+                return 410, "Expired"
             if draft.token_consumed:
                 return 409, "Already consumed"
 
@@ -225,19 +309,55 @@ class Orchestrator:
         edited, _ = self.critic.execute((candidates, materials, style, thread_plan))
         report, _ = self.policy.execute((edited, materials, recent_posts, style))
 
-        self._update_draft_generation(token, candidates, edited, report, style, thread_plan)
+        self._update_draft_generation(draft.id, candidates, edited, report, style, thread_plan)
+        return 200, "Regenerated"
+
+    def regenerate_by_id(self, draft_id: str) -> tuple[int, str]:
+        with get_sessionmaker()() as session:
+            draft = db.get_draft(session, draft_id)
+            if draft is None:
+                return 404, "Not found"
+            if _is_expired(draft.expires_at):
+                return 410, "Expired"
+            if draft.token_consumed:
+                return 409, "Already consumed"
+
+            materials = Materials(**draft.materials_json)
+            topic_plan = TopicPlan(**draft.topic_plan_json)
+            style = StyleProfile(**draft.style_profile_json)
+            thread_plan = (
+                ThreadPlan(**draft.thread_plan_json)
+                if draft.thread_plan_json
+                else ThreadPlan(enabled=False, tweets_count=1)
+            )
+            recent_posts = db.get_recent_posts(session, days=14)
+
+        candidates, _ = self.writer.execute((topic_plan, thread_plan, style, materials))
+        edited, _ = self.critic.execute((candidates, materials, style, thread_plan))
+        report, _ = self.policy.execute((edited, materials, recent_posts, style))
+
+        self._update_draft_generation(draft_id, candidates, edited, report, style, thread_plan)
         return 200, "Regenerated"
 
     def skip_draft(self, token: str) -> tuple[int, str]:
         with get_sessionmaker()() as session:
-            draft = db.get_draft_by_token(session, token)
-            if draft is None:
+            draft, token_row, token_status = db.resolve_action_token(
+                session=session, action="skip", raw_token=token
+            )
+            if token_status == "not_found":
+                return 404, "Not found"
+            if token_status == "expired":
+                return 410, "Expired"
+            if token_status == "consumed":
+                return 200, "Already skipped"
+            if draft is None or token_row is None:
                 return 404, "Not found"
             if _is_expired(draft.expires_at):
                 return 410, "Expired"
             if draft.token_consumed:
                 return 409, "Token consumed"
             db.mark_draft_skipped(session, draft)
+            db.consume_action_token(session, token_row)
             session.commit()
         return 200, "Skipped"
 
@@ -289,11 +409,16 @@ class Orchestrator:
             edited,
             report,
         )
+        draft_id, view_token, edit_token, approve_token, skip_token = token
         status = "pending" if report.action == "PASS" else "needs_human_attention"
-        self._update_draft_status(token, status)
+        self._update_draft_status(draft_id, status)
 
         record = ApprovedDraftRecord(
-            token=token,
+            draft_id=draft_id,
+            approve_token=approve_token,
+            edit_token=edit_token,
+            skip_token=skip_token,
+            view_token=view_token,
             mode=edited.mode,
             text=edited.final_text,
             tweets=edited.final_tweets,
@@ -338,41 +463,71 @@ class Orchestrator:
         candidates: DraftCandidates,
         edited: EditedDraft,
         report: PolicyReport,
-    ) -> str:
-        token = str(uuid.uuid5(uuid.NAMESPACE_URL, f"draft:{run_id}"))
+    ) -> tuple[str, str, str, str, str]:
+        draft_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"draft_id:{run_id}"))
         now = datetime.now(UTC)
-        expires = now + timedelta(hours=int(getattr(settings, "TOKEN_TTL_HOURS", 36) or 36))
+        ttl_hours = int(getattr(settings, "TOKEN_TTL_HOURS", 36) or 36)
+        expires = now + timedelta(hours=ttl_hours)
         status = "pending" if report.action == "PASS" else "needs_human_attention"
         with get_sessionmaker()() as session:
-            db.create_draft(
+            existing = db.get_draft(session, draft_id)
+            draft = existing
+            if draft is None:
+                draft = db.create_draft(
+                    session=session,
+                    run_id=run_id,
+                    draft_id=draft_id,
+                    token_hash=secrets.token_hex(32),
+                    created_at=now,
+                    expires_at=expires,
+                    status=status,
+                    materials=materials,
+                    topic_plan=plan,
+                    style_profile=style,
+                    thread_plan=thread_plan,
+                    candidates=candidates,
+                    edited_draft=edited,
+                    policy_report=report,
+                )
+
+            ttl_seconds = ttl_hours * 3600
+            view_token = db.issue_action_token(
+                session=session, draft=draft, action="view", ttl_seconds=ttl_seconds, one_time=False
+            )
+            edit_token = db.issue_action_token(
+                session=session, draft=draft, action="edit", ttl_seconds=ttl_seconds, one_time=False
+            )
+            approve_token = db.issue_action_token(
                 session=session,
-                run_id=run_id,
-                token=token,
-                created_at=now,
-                expires_at=expires,
-                status=status,
-                materials=materials,
-                topic_plan=plan,
-                style_profile=style,
-                thread_plan=thread_plan,
-                candidates=candidates,
-                edited_draft=edited,
-                policy_report=report,
+                draft=draft,
+                action="approve",
+                ttl_seconds=ttl_seconds,
+                one_time=True,
+            )
+            skip_token = db.issue_action_token(
+                session=session, draft=draft, action="skip", ttl_seconds=ttl_seconds, one_time=True
+            )
+            _ = db.issue_action_token(
+                session=session,
+                draft=draft,
+                action="regenerate",
+                ttl_seconds=ttl_seconds,
+                one_time=False,
             )
             session.commit()
-        return token
+        return draft_id, view_token, edit_token, approve_token, skip_token
 
-    def _update_draft_status(self, token: str, status: str) -> None:
+    def _update_draft_status(self, draft_id: str, status: str) -> None:
         with get_sessionmaker()() as session:
-            draft = db.get_draft_by_token(session, token)
+            draft = db.get_draft(session, draft_id)
             if draft is None:
                 return
             draft.status = status
             session.commit()
 
-    def _update_policy_report(self, token: str, report: PolicyReport) -> None:
+    def _update_policy_report(self, draft_id: str, report: PolicyReport) -> None:
         with get_sessionmaker()() as session:
-            draft = db.get_draft_by_token(session, token)
+            draft = db.get_draft(session, draft_id)
             if draft is None:
                 return
             db.update_draft_policy_report(session, draft, report)
@@ -380,7 +535,7 @@ class Orchestrator:
 
     def _update_draft_generation(
         self,
-        token: str,
+        draft_id: str,
         candidates: DraftCandidates,
         edited: EditedDraft,
         report: PolicyReport,
@@ -388,7 +543,7 @@ class Orchestrator:
         thread_plan: ThreadPlan,
     ) -> None:
         with get_sessionmaker()() as session:
-            draft = db.get_draft_by_token(session, token)
+            draft = db.get_draft(session, draft_id)
             if draft is None:
                 return
 

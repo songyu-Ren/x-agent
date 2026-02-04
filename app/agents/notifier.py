@@ -32,9 +32,9 @@ class NotifierAgent(BaseAgent):
         subject = f"Daily X Draft: {record.policy_report.action} - {preview[:30]}..."
 
         base_url = settings.BASE_PUBLIC_URL.rstrip("/")
-        approve_link = f"{base_url}/approve/{record.token}"
-        edit_link = f"{base_url}/edit/{record.token}"
-        skip_link = f"{base_url}/skip/{record.token}"
+        approve_link = f"{base_url}/approve/{record.approve_token}"
+        edit_link = f"{base_url}/edit/{record.edit_token}"
+        skip_link = f"{base_url}/skip/{record.skip_token}"
 
         rendered_text = self._render_text(record)
         html = f"""
@@ -67,7 +67,7 @@ class NotifierAgent(BaseAgent):
     def _send_whatsapp(self, record: ApprovedDraftRecord, errors: list[str]) -> bool:
         try:
             base_url = settings.BASE_PUBLIC_URL.rstrip("/")
-            body = f"Daily X Draft:\n\n{self._render_text(record)}\n\nApprove: {base_url}/approve/{record.token}\nEdit: {base_url}/edit/{record.token}\nSkip: {base_url}/skip/{record.token}"
+            body = f"Daily X Draft:\n\n{self._render_text(record)}\n\nApprove: {base_url}/approve/{record.approve_token}\nEdit: {base_url}/edit/{record.edit_token}\nSkip: {base_url}/skip/{record.skip_token}"
             send_whatsapp(body)
             return True
         except Exception:
