@@ -5,6 +5,7 @@ from openai import OpenAI
 from app.agents.base import BaseAgent
 from app.config import settings
 from app.models import Materials, StyleProfile, ThreadPlan, TopicPlan
+from app.runtime_config import get_bool, get_int
 from app.services.retry import with_retry
 
 
@@ -19,9 +20,9 @@ class ThreadPlannerAgent(BaseAgent):
     def run(self, input_data: tuple[TopicPlan, Materials, StyleProfile]) -> ThreadPlan:
         topic_plan, materials, style = input_data
 
-        thread_enabled = str(getattr(settings, "THREAD_ENABLED", "false")).lower() == "true"
-        max_tweets = int(getattr(settings, "THREAD_MAX_TWEETS", 5) or 5)
-        numbering = str(getattr(settings, "THREAD_NUMBERING_ENABLED", "true")).lower() == "true"
+        thread_enabled = get_bool("thread_enabled", bool(settings.THREAD_ENABLED))
+        max_tweets = get_int("thread_max_tweets", int(settings.THREAD_MAX_TWEETS))
+        numbering = get_bool("thread_numbering_enabled", bool(settings.THREAD_NUMBERING_ENABLED))
 
         devlog = materials.devlog.raw_snippet if materials.devlog else ""
         user_force = "THREAD: true" in devlog

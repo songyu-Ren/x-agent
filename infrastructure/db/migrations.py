@@ -16,3 +16,7 @@ def run_migrations() -> None:
     with engine.connect() as connection:
         cfg.attributes["connection"] = connection
         command.upgrade(cfg, "head")
+
+
+if __name__ == "__main__":
+    run_migrations()

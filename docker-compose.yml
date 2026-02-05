@@ -1,8 +1,10 @@
-version: '3.8'
+version: "3.8"
 
 services:
   api:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile.api
     container_name: daily-x-agent-api
     ports:
       - "8000:8000"
@@ -12,7 +14,7 @@ services:
     environment:
       - SMTP_SERVER=mailhog
       - SMTP_PORT=1025
-      - ENV=production
+      - ENV=development
       - LOG_FORMAT=json
       - DATABASE_URL=postgresql+psycopg://daily_agent:daily_agent@postgres:5432/daily_agent
       - REDIS_URL=redis://redis:6379/0
@@ -21,6 +23,7 @@ services:
       - METRICS_ENABLED=true
       - OTEL_ENABLED=true
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318/v1/traces
+      - DRY_RUN=true
     env_file:
       - .env
     depends_on:
@@ -28,21 +31,24 @@ services:
       - redis
       - mailhog
       - otel-collector
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
 
   worker:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
     container_name: daily-x-agent-worker
-    command: celery -A app.celery_app worker -l info
     volumes:
       - .:/app
       - ./data:/app/data
     environment:
-      - ENV=production
+      - ENV=development
       - LOG_FORMAT=json
       - DATABASE_URL=postgresql+psycopg://daily_agent:daily_agent@postgres:5432/daily_agent
       - REDIS_URL=redis://redis:6379/0
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - DRY_RUN=true
     env_file:
       - .env
     depends_on:
@@ -50,24 +56,39 @@ services:
       - redis
 
   scheduler:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile.scheduler
     container_name: daily-x-agent-scheduler
-    command: celery -A app.celery_app beat -l info
     volumes:
       - .:/app
       - ./data:/app/data
     environment:
-      - ENV=production
+      - ENV=development
       - LOG_FORMAT=json
       - DATABASE_URL=postgresql+psycopg://daily_agent:daily_agent@postgres:5432/daily_agent
       - REDIS_URL=redis://redis:6379/0
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
       - TIMEZONE=Europe/Amsterdam
+      - DRY_RUN=true
     env_file:
       - .env
     depends_on:
+      - postgres
       - redis
+
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    container_name: daily-x-agent-frontend
+    ports:
+      - "3000:3000"
+    environment:
+      - BACKEND_URL=http://api:8000
+    depends_on:
+      - api
 
   postgres:
     image: postgres:16

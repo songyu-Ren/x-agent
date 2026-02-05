@@ -4,8 +4,57 @@ import json
 import logging
 import logging.config
 import sys
+from contextvars import ContextVar
 from datetime import UTC, datetime
 from typing import Any
+
+_request_id: ContextVar[str | None] = ContextVar("request_id", default=None)
+_run_id: ContextVar[str | None] = ContextVar("run_id", default=None)
+_draft_id: ContextVar[str | None] = ContextVar("draft_id", default=None)
+_user_id: ContextVar[str | None] = ContextVar("user_id", default=None)
+
+
+def get_request_id() -> str | None:
+    return _request_id.get()
+
+
+def get_run_id() -> str | None:
+    return _run_id.get()
+
+
+def get_draft_id() -> str | None:
+    return _draft_id.get()
+
+
+def get_user_id() -> str | None:
+    return _user_id.get()
+
+
+def bind_correlation_ids(
+    *,
+    request_id: str | None = None,
+    run_id: str | None = None,
+    draft_id: str | None = None,
+    user_id: str | None = None,
+) -> dict[ContextVar[str | None], Any]:
+    tokens: dict[ContextVar[str | None], Any] = {}
+    if request_id is not None:
+        tokens[_request_id] = _request_id.set(request_id)
+    if run_id is not None:
+        tokens[_run_id] = _run_id.set(run_id)
+    if draft_id is not None:
+        tokens[_draft_id] = _draft_id.set(draft_id)
+    if user_id is not None:
+        tokens[_user_id] = _user_id.set(user_id)
+    return tokens
+
+
+def reset_correlation_ids(tokens: dict[ContextVar[str | None], Any]) -> None:
+    for var, token in tokens.items():
+        try:
+            var.reset(token)
+        except Exception:
+            continue
 
 
 def _get_trace_context() -> tuple[str | None, str | None]:
@@ -33,6 +82,10 @@ class JsonFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
         ts = datetime.fromtimestamp(record.created, tz=UTC).isoformat()
         trace_id, span_id = _get_trace_context()
+        request_id = get_request_id()
+        run_id = get_run_id()
+        draft_id = get_draft_id()
+        user_id = get_user_id()
         payload: dict[str, Any] = {
             "timestamp": ts,
             "level": record.levelname,
@@ -40,6 +93,15 @@ class JsonFormatter(logging.Formatter):
             "message": record.getMessage(),
             "service": self.service_name,
         }
+
+        if request_id:
+            payload["request_id"] = request_id
+        if run_id:
+            payload["run_id"] = run_id
+        if draft_id:
+            payload["draft_id"] = draft_id
+        if user_id:
+            payload["user_id"] = user_id
 
         if trace_id:
             payload["trace_id"] = trace_id

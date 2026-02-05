@@ -10,6 +10,44 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response as StarletteResponse
 
+RUNS_TOTAL = Counter(
+    "runs_total",
+    "Total orchestrator runs started",
+    labelnames=("source",),
+)
+RUNS_FAILED_TOTAL = Counter(
+    "runs_failed_total",
+    "Total orchestrator runs failed",
+    labelnames=("source",),
+)
+JOB_LATENCY_SECONDS = Histogram(
+    "job_latency_seconds",
+    "Job latency in seconds",
+    labelnames=("job",),
+    buckets=(0.25, 0.5, 1, 2, 5, 10, 30, 60, 120, 300, 600),
+)
+NOTIFY_TOTAL = Counter(
+    "notify_total",
+    "Notifications attempted",
+    labelnames=("channel", "status"),
+)
+PUBLISH_TOTAL = Counter(
+    "publish_total",
+    "Publish attempts",
+    labelnames=("status", "dry_run"),
+)
+POLICY_FAIL_TOTAL = Counter(
+    "policy_fail_total",
+    "Policy failures (non-PASS outcomes)",
+    labelnames=("action",),
+)
+AGENT_LATENCY_SECONDS = Histogram(
+    "agent_latency_seconds",
+    "Agent execution latency in seconds",
+    labelnames=("agent",),
+    buckets=(0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 30, 60),
+)
+
 HTTP_REQUESTS_TOTAL = Counter(
     "http_requests_total",
     "Total HTTP requests",

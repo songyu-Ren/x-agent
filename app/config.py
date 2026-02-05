@@ -65,6 +65,10 @@ class Settings(BaseSettings):
     OTEL_EXPORTER_OTLP_HEADERS: str = ""
     OTEL_TRACES_SAMPLER_RATIO: float = 0.1
 
+    SENTRY_ENABLED: bool = False
+    SENTRY_DSN: str | None = None
+    SENTRY_TRACES_SAMPLE_RATE: float = 0.0
+
     # Sources (plugins)
     ENABLE_SOURCE_NOTION: bool = False
     ENABLE_SOURCE_GITHUB: bool = False
@@ -99,12 +103,20 @@ class Settings(BaseSettings):
     EMAIL_FROM: str = "daily-agent@example.com"
     EMAIL_TO: str = "me@example.com"
 
+    # Slack
+    ENABLE_SLACK: bool = False
+    SLACK_WEBHOOK_URL: str | None = None
+
     # WhatsApp
     ENABLE_WHATSAPP: bool = False
     TWILIO_ACCOUNT_SID: str | None = None
     TWILIO_AUTH_TOKEN: str | None = None
     TWILIO_FROM_NUMBER: str | None = None
     TWILIO_TO_NUMBER: str | None = None
+
+    # Policy v3 controls
+    POLICY_LLM_CLAIMS_ENABLED: bool = False
+    POLICY_LLM_CLAIMS_MODEL: str | None = None
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 

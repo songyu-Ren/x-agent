@@ -185,6 +185,16 @@ class WeeklyReport(Base):
     __table_args__ = (Index("ix_weekly_reports_window", "week_start", "week_end", unique=True),)
 
 
+class AppConfig(Base):
+    __tablename__ = "app_config"
+
+    key: Mapped[str] = mapped_column(String(80), primary_key=True)
+    value_json: Mapped[dict] = mapped_column(_json_type(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
+
+
 class User(Base):
     __tablename__ = "users"
 

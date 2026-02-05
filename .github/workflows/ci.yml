@@ -31,5 +31,11 @@ jobs:
       - name: Mypy
         run: mypy app tests
 
-      - name: Pytest
-        run: python -m pytest -q
+      - name: Coverage
+        run: |
+          python -m coverage run --source=app,domain,infrastructure -m pytest -q
+          python -m coverage report --fail-under=70
+          python -m coverage xml
+
+      - name: Docker build
+        run: docker build -t x-agent:ci .

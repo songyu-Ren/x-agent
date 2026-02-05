@@ -74,6 +74,12 @@ class BaseAgent(ABC):
                 errors=error_msg,
                 warnings=warnings,
             )
+            try:
+                from app.observability.metrics import AGENT_LATENCY_SECONDS
+
+                AGENT_LATENCY_SECONDS.labels(agent=self.name).observe(duration_ms / 1000.0)
+            except Exception:
+                pass
             logger.info("[%s] Finished in %sms", self.name, duration_ms)
 
         return output_data, log

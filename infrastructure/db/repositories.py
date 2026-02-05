@@ -42,6 +42,29 @@ def create_run(session: Session, run_id: str, source: str, created_at: datetime)
     session.add(models.Run(run_id=run_id, source=source, status="running", created_at=created_at))
 
 
+def list_runs(
+    session: Session, since: datetime, limit: int = 200
+) -> list[tuple[str, str, datetime, datetime | None, int | None, str | None]]:
+    stmt: Select[tuple[models.Run]] = (
+        select(models.Run)
+        .where(models.Run.created_at >= since)
+        .order_by(models.Run.created_at.desc())
+        .limit(limit)
+    )
+    rows = list(session.execute(stmt).scalars().all())
+    return [
+        (
+            str(r.run_id),
+            str(r.status),
+            r.created_at,
+            r.finished_at,
+            int(r.duration_ms) if r.duration_ms is not None else None,
+            str(r.last_error) if r.last_error else None,
+        )
+        for r in rows
+    ]
+
+
 def update_run_status(
     session: Session,
     run_id: str,
@@ -369,6 +392,16 @@ def get_existing_thread_posts(session: Session, draft: models.Draft) -> dict[int
     return {int(pos): str(tid) for (pos, tid) in rows}
 
 
+def get_latest_publish_attempt(session: Session, draft_id: str) -> models.PublishAttempt | None:
+    stmt: Select[tuple[models.PublishAttempt]] = (
+        select(models.PublishAttempt)
+        .where(models.PublishAttempt.draft_id == draft_id)
+        .order_by(models.PublishAttempt.attempt.desc())
+        .limit(1)
+    )
+    return session.execute(stmt).scalar_one_or_none()
+
+
 def get_recent_posts(session: Session, days: int = 14, limit: int = 200) -> list[str]:
     cutoff = datetime.now(UTC) - timedelta(days=days)
     stmt = (
@@ -535,6 +568,24 @@ def delete_user_session(session: Session, session_id: str) -> None:
     row = session.get(models.UserSession, session_id)
     if row is not None:
         session.delete(row)
+
+
+def get_app_config(session: Session, key: str) -> dict | None:
+    row = session.get(models.AppConfig, key)
+    if row is None:
+        return None
+    return dict(row.value_json or {})
+
+
+def set_app_config(session: Session, key: str, value: dict) -> None:
+    now = datetime.now(UTC)
+    row = session.get(models.AppConfig, key)
+    if row is None:
+        session.add(models.AppConfig(key=key, value_json=value, updated_at=now))
+        return
+    row.value_json = value
+    row.updated_at = now
+    session.add(row)
 
 
 def add_audit_log(

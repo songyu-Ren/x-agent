@@ -1,3 +1,4 @@
+import contextlib
 import json
 import logging
 import os
@@ -32,6 +33,14 @@ from app.models import (
     TopicPlan,
     WeeklyReport,
 )
+from app.observability.logging import bind_correlation_ids, reset_correlation_ids
+from app.observability.metrics import (
+    JOB_LATENCY_SECONDS,
+    POLICY_FAIL_TOTAL,
+    PUBLISH_TOTAL,
+    RUNS_FAILED_TOTAL,
+    RUNS_TOTAL,
+)
 from app.services.email_service import send_email_html
 from app.services.whatsapp_service import send_whatsapp
 from infrastructure.db import models
@@ -57,6 +66,8 @@ class Orchestrator:
     def start_run(self, source: str = "scheduler", run_id: str | None = None) -> str:
         run_id = run_id or str(uuid.uuid4())
         started_at = datetime.now(UTC)
+        RUNS_TOTAL.labels(source=source).inc()
+        tokens = bind_correlation_ids(run_id=run_id)
         run_state = RunState(run_id=run_id, created_at=started_at, source=source)
         with get_sessionmaker()() as session:
             db.create_run(session, run_id=run_id, source=source, created_at=started_at)
@@ -65,9 +76,12 @@ class Orchestrator:
         logs: list[AgentLog] = []
         try:
             self._execute_workflow(run_state, logs)
-            self._finalize_run(run_id, "completed", started_at, None, logs)
+            self._finalize_run(run_id, source, "completed", started_at, None, logs)
         except Exception as e:
-            self._finalize_run(run_id, "failed", started_at, str(e), logs)
+            RUNS_FAILED_TOTAL.labels(source=source).inc()
+            self._finalize_run(run_id, source, "failed", started_at, str(e), logs)
+        finally:
+            reset_correlation_ids(tokens)
         return run_id
 
     def update_style_profile(self) -> None:
@@ -100,11 +114,11 @@ class Orchestrator:
         <h2>Weekly Report</h2>
         <p><b>Window:</b> {report.week_start.isoformat()} → {report.week_end.isoformat()}</p>
         <h3>Top Buckets</h3>
-        <ul>{''.join([f'<li>{b}</li>' for b in report.top_topic_buckets])}</ul>
+        <ul>{"".join([f"<li>{b}</li>" for b in report.top_topic_buckets])}</ul>
         <h3>Recommendations</h3>
-        <ul>{''.join([f'<li>{r}</li>' for r in report.recommendations])}</ul>
+        <ul>{"".join([f"<li>{r}</li>" for r in report.recommendations])}</ul>
         <h3>Next Week Topics</h3>
-        <ul>{''.join([f'<li>{t}</li>' for t in report.next_week_topics])}</ul>
+        <ul>{"".join([f"<li>{t}</li>" for t in report.next_week_topics])}</ul>
         """
         send_email_html(subject, html)
         if settings.ENABLE_WHATSAPP:
@@ -112,6 +126,8 @@ class Orchestrator:
             send_whatsapp(body)
 
     def approve_draft(self, token: str) -> tuple[int, str]:
+        run_id_ctx: str | None = None
+        draft_id_ctx: str | None = None
         with get_sessionmaker()() as session:
             draft, token_row, token_status = db.resolve_action_token(
                 session=session, action="approve", raw_token=token
@@ -134,6 +150,8 @@ class Orchestrator:
             if draft.status in {"posted", "dry_run_posted", "skipped", "error"}:
                 return 200, f"Already {draft.status}"
 
+            run_id_ctx = draft.run_id
+            draft_id_ctx = draft.id
             materials = Materials(**draft.materials_json)
             style = StyleProfile(**draft.style_profile_json)
             recent_posts = db.get_recent_posts(session, days=14)
@@ -143,91 +161,227 @@ class Orchestrator:
             if draft.thread_enabled and draft.tweets_json:
                 edited_draft.final_tweets = [str(t) for t in draft.tweets_json if t]
 
-        report, _ = self.policy.execute((edited_draft, materials, recent_posts, style))
-        if report.action != "PASS":
-            return 403, "Policy check failed"
-
-        publish_owner = str(uuid.uuid4())
-        draft_id: str
-        with get_sessionmaker()() as session:
-            draft, token_row, token_status = db.resolve_action_token(
-                session=session, action="approve", raw_token=token
-            )
-            if token_status == "not_found":
-                return 404, "Token not found"
-            if token_status == "expired":
-                return 410, "Token expired"
-            if token_status == "consumed":
-                return 200, "Already processed"
-            if draft is None or token_row is None:
-                return 404, "Token not found"
-            if draft.token_consumed:
-                return 200, f"Already processed: {draft.status}"
-            if _is_expired(draft.expires_at):
-                return 410, "Token expired"
-
-            draft_id = draft.id
-            started, attempt_row = db.try_start_publish_attempt(
-                session=session, draft=draft, attempt=1, owner=publish_owner
-            )
-            if not started:
-                if attempt_row is None:
-                    return 409, "Publish already started"
-                if attempt_row.status == "completed":
-                    return 200, f"Already processed: {draft.status}"
-                if attempt_row.status == "failed":
-                    return 409, "Previous publish attempt failed; use resume action"
-                return 200, "Publish already in progress"
-
-            draft.status = "publishing"
-            db.consume_action_token(session, token_row)
-            session.commit()
-
-        if edited_draft.mode == "thread":
-            tweets = list(
-                edited_draft.final_tweets
-                or ([edited_draft.final_text] if edited_draft.final_text else [])
-            )
-        else:
-            tweets = [edited_draft.final_text or ""]
-        tweets = [t for t in tweets if t]
-
-        publish_req = PublishRequest(
-            draft_id=draft_id, tweets=tweets, dry_run=bool(settings.DRY_RUN), reply_chain=True
-        )
-
+        tokens = bind_correlation_ids(run_id=run_id_ctx, draft_id=draft_id_ctx)
         try:
-            result = self.publisher.run(publish_req)
-            tweet_ids = result.tweet_ids
-            new_status = "dry_run_posted" if settings.DRY_RUN else "posted"
+            report, _ = self.policy.execute((edited_draft, materials, recent_posts, style))
+            if report.action != "PASS":
+                POLICY_FAIL_TOTAL.labels(action=str(report.action)).inc()
+                return 403, "Policy check failed"
 
+            publish_owner = str(uuid.uuid4())
+            draft_id: str
             with get_sessionmaker()() as session:
-                draft_row = db.get_draft(session, draft_id)
-                if draft_row is None:
-                    return 404, "Draft not found"
-                attempt_row = db.get_publish_attempt(session, draft_id, attempt=1)
-                db.mark_draft_consumed(
-                    session=session,
-                    draft=draft_row,
-                    status=new_status,
-                    published_tweet_ids=tweet_ids,
-                    approval_idempotency_key=f"approve:{draft_id}",
+                draft, token_row, token_status = db.resolve_action_token(
+                    session=session, action="approve", raw_token=token
                 )
-                if attempt_row is not None:
-                    db.mark_publish_attempt_completed(session, attempt_row)
+                if token_status == "not_found":
+                    return 404, "Token not found"
+                if token_status == "expired":
+                    return 410, "Token expired"
+                if token_status == "consumed":
+                    return 200, "Already processed"
+                if draft is None or token_row is None:
+                    return 404, "Token not found"
+                if draft.token_consumed:
+                    return 200, f"Already processed: {draft.status}"
+                if _is_expired(draft.expires_at):
+                    return 410, "Token expired"
+
+                draft_id = draft.id
+                started, attempt_row = db.try_start_publish_attempt(
+                    session=session, draft=draft, attempt=1, owner=publish_owner
+                )
+                if not started:
+                    if attempt_row is None:
+                        return 409, "Publish already started"
+                    if attempt_row.status == "completed":
+                        return 200, f"Already processed: {draft.status}"
+                    if attempt_row.status == "failed":
+                        return 409, "Previous publish attempt failed; use resume action"
+                    return 200, "Publish already in progress"
+
+                draft.status = "publishing"
+                db.consume_action_token(session, token_row)
                 session.commit()
-            return 200, f"Published: {tweet_ids}"
-        except Exception as e:
-            with get_sessionmaker()() as session:
-                draft_row = db.get_draft(session, draft_id)
-                if draft_row is not None:
+
+            if edited_draft.mode == "thread":
+                tweets = list(
+                    edited_draft.final_tweets
+                    or ([edited_draft.final_text] if edited_draft.final_text else [])
+                )
+            else:
+                tweets = [edited_draft.final_text or ""]
+            tweets = [t for t in tweets if t]
+
+            publish_req = PublishRequest(
+                draft_id=draft_id, tweets=tweets, dry_run=bool(settings.DRY_RUN), reply_chain=True
+            )
+
+            try:
+                result = self.publisher.run(publish_req)
+                PUBLISH_TOTAL.labels(
+                    status="success", dry_run=("true" if settings.DRY_RUN else "false")
+                ).inc()
+                tweet_ids = result.tweet_ids
+                new_status = "dry_run_posted" if settings.DRY_RUN else "posted"
+
+                with get_sessionmaker()() as session:
+                    draft_row = db.get_draft(session, draft_id)
+                    if draft_row is None:
+                        return 404, "Draft not found"
                     attempt_row = db.get_publish_attempt(session, draft_id, attempt=1)
-                    draft_row.status = "error"
-                    draft_row.last_error = str(e)[:500]
+                    db.mark_draft_consumed(
+                        session=session,
+                        draft=draft_row,
+                        status=new_status,
+                        published_tweet_ids=tweet_ids,
+                        approval_idempotency_key=f"approve:{draft_id}",
+                    )
                     if attempt_row is not None:
-                        db.mark_publish_attempt_failed(session, attempt_row, error=str(e))
+                        db.mark_publish_attempt_completed(session, attempt_row)
                     session.commit()
-            return 500, "Publish failed"
+                return 200, f"Published: {tweet_ids}"
+            except Exception as e:
+                PUBLISH_TOTAL.labels(
+                    status="failed", dry_run=("true" if settings.DRY_RUN else "false")
+                ).inc()
+                with get_sessionmaker()() as session:
+                    draft_row = db.get_draft(session, draft_id)
+                    if draft_row is not None:
+                        attempt_row = db.get_publish_attempt(session, draft_id, attempt=1)
+                        draft_row.status = "error"
+                        draft_row.last_error = str(e)[:500]
+                        if attempt_row is not None:
+                            db.mark_publish_attempt_failed(session, attempt_row, error=str(e))
+                        session.commit()
+                return 500, "Publish failed"
+        finally:
+            reset_correlation_ids(tokens)
+
+    def approve_draft_by_id(self, draft_id: str) -> tuple[int, str]:
+        run_id_ctx: str | None = None
+        with get_sessionmaker()() as session:
+            draft = db.get_draft(session, draft_id)
+            if draft is None:
+                return 404, "Draft not found"
+            if _is_expired(draft.expires_at):
+                return 410, "Expired"
+            if draft.status in {"posted", "dry_run_posted", "skipped"}:
+                return 200, f"Already {draft.status}"
+
+            run_id_ctx = draft.run_id
+            materials = Materials(**draft.materials_json)
+            style = StyleProfile(**draft.style_profile_json)
+            recent_posts = db.get_recent_posts(session, days=14)
+
+            edited_draft = EditedDraft(**draft.edited_draft_json)
+            edited_draft.final_text = str(draft.final_text or edited_draft.final_text or "")
+            if draft.thread_enabled and draft.tweets_json:
+                edited_draft.final_tweets = [str(t) for t in draft.tweets_json if t]
+
+        tokens = bind_correlation_ids(run_id=run_id_ctx, draft_id=draft_id)
+        try:
+            report, _ = self.policy.execute((edited_draft, materials, recent_posts, style))
+            if report.action != "PASS":
+                POLICY_FAIL_TOTAL.labels(action=str(report.action)).inc()
+                return 403, "Policy check failed"
+
+            publish_owner = str(uuid.uuid4())
+            attempt_num: int
+            with get_sessionmaker()() as session:
+                draft = db.get_draft(session, draft_id)
+                if draft is None:
+                    return 404, "Draft not found"
+                if _is_expired(draft.expires_at):
+                    return 410, "Expired"
+                if draft.status in {"posted", "dry_run_posted", "skipped"}:
+                    return 200, f"Already {draft.status}"
+
+                latest_attempt = db.get_latest_publish_attempt(session, draft_id)
+                if latest_attempt is None:
+                    attempt_num = 1
+                else:
+                    if latest_attempt.status == "started":
+                        return 409, "Publish already started"
+                    attempt_num = int(latest_attempt.attempt) + 1
+
+                started, attempt_row = db.try_start_publish_attempt(
+                    session=session, draft=draft, attempt=attempt_num, owner=publish_owner
+                )
+                if not started:
+                    if attempt_row is None:
+                        return 409, "Publish already started"
+                    if attempt_row.status == "completed":
+                        return 200, f"Already processed: {draft.status}"
+                    if attempt_row.status == "failed":
+                        return 409, "Previous publish attempt failed; use resume action"
+                    return 200, "Publish already in progress"
+
+                draft.status = "publishing"
+                session.commit()
+
+            if edited_draft.mode == "thread":
+                tweets = list(
+                    edited_draft.final_tweets
+                    or ([edited_draft.final_text] if edited_draft.final_text else [])
+                )
+            else:
+                tweets = [edited_draft.final_text or ""]
+            tweets = [t for t in tweets if t]
+
+            publish_req = PublishRequest(
+                draft_id=draft_id, tweets=tweets, dry_run=bool(settings.DRY_RUN), reply_chain=True
+            )
+
+            try:
+                result = self.publisher.run(publish_req)
+                PUBLISH_TOTAL.labels(
+                    status="success", dry_run=("true" if settings.DRY_RUN else "false")
+                ).inc()
+                tweet_ids = result.tweet_ids
+                new_status = "dry_run_posted" if settings.DRY_RUN else "posted"
+
+                with get_sessionmaker()() as session:
+                    draft_row = db.get_draft(session, draft_id)
+                    if draft_row is None:
+                        return 404, "Draft not found"
+                    attempt_row = db.get_publish_attempt(session, draft_id, attempt=attempt_num)
+                    db.mark_draft_consumed(
+                        session=session,
+                        draft=draft_row,
+                        status=new_status,
+                        published_tweet_ids=tweet_ids,
+                        approval_idempotency_key=f"approve:{draft_id}",
+                    )
+                    if attempt_row is not None:
+                        db.mark_publish_attempt_completed(session, attempt_row)
+                    session.commit()
+                return 200, f"Published: {tweet_ids}"
+            except Exception as e:
+                PUBLISH_TOTAL.labels(
+                    status="failed", dry_run=("true" if settings.DRY_RUN else "false")
+                ).inc()
+                with get_sessionmaker()() as session:
+                    draft_row = db.get_draft(session, draft_id)
+                    if draft_row is not None:
+                        attempt_row = db.get_publish_attempt(session, draft_id, attempt=attempt_num)
+                        draft_row.status = "error"
+                        draft_row.last_error = str(e)[:500]
+                        if attempt_row is not None:
+                            db.mark_publish_attempt_failed(session, attempt_row, error=str(e))
+                        session.commit()
+                return 500, "Publish failed"
+        finally:
+            reset_correlation_ids(tokens)
+
+    def resume_publish_by_id(self, draft_id: str) -> tuple[int, str]:
+        with get_sessionmaker()() as session:
+            draft = db.get_draft(session, draft_id)
+            if draft is None:
+                return 404, "Draft not found"
+            if draft.status not in {"error", "publishing"}:
+                return 409, f"Cannot resume from status {draft.status}"
+        return self.approve_draft_by_id(draft_id)
 
     def save_edit(self, token: str, new_texts: list[str]) -> tuple[int, PolicyReport]:
         with get_sessionmaker()() as session:
@@ -281,6 +435,30 @@ class Orchestrator:
 
         report, _ = self.policy.execute((edited, materials, recent_posts, style))
         self._update_policy_report(draft_id, report)
+        return 200, report
+
+    def policy_check_by_id(self, draft_id: str, new_texts: list[str]) -> tuple[int, PolicyReport]:
+        with get_sessionmaker()() as session:
+            draft = db.get_draft(session, draft_id)
+            if draft is None:
+                raise RuntimeError("Not found")
+            if _is_expired(draft.expires_at):
+                raise RuntimeError("Expired")
+
+            materials = Materials(**draft.materials_json)
+            style = StyleProfile(**draft.style_profile_json)
+            recent_posts = db.get_recent_posts(session, days=14)
+            edited = EditedDraft(**draft.edited_draft_json)
+            if draft.thread_enabled:
+                edited.final_tweets = list(new_texts)
+                edited.final_text = "\n".join([t for t in new_texts if t]).strip()
+                edited.mode = "thread"
+            else:
+                edited.final_text = str(new_texts[0] if new_texts else "")
+                edited.final_tweets = None
+                edited.mode = "single"
+
+        report, _ = self.policy.execute((edited, materials, recent_posts, style))
         return 200, report
 
     def regenerate(self, token: str) -> tuple[int, str]:
@@ -361,6 +539,21 @@ class Orchestrator:
             session.commit()
         return 200, "Skipped"
 
+    def skip_draft_by_id(self, draft_id: str) -> tuple[int, str]:
+        with get_sessionmaker()() as session:
+            draft = db.get_draft(session, draft_id)
+            if draft is None:
+                return 404, "Not found"
+            if _is_expired(draft.expires_at):
+                return 410, "Expired"
+            if draft.status in {"posted", "dry_run_posted"}:
+                return 409, f"Cannot skip {draft.status}"
+            if draft.status == "skipped":
+                return 200, "Already skipped"
+            db.mark_draft_skipped(session, draft)
+            session.commit()
+        return 200, "Skipped"
+
     def _execute_workflow(self, run_state: RunState, logs: list[AgentLog]) -> None:
         materials, log = self.collector.execute(run_state)
         logs.append(log)
@@ -399,6 +592,10 @@ class Orchestrator:
                 continue
             break
 
+        if report.action != "PASS":
+            with contextlib.suppress(Exception):
+                POLICY_FAIL_TOTAL.labels(action=str(report.action)).inc()
+
         token = self._create_draft_record(
             run_state.run_id,
             materials,
@@ -410,27 +607,32 @@ class Orchestrator:
             report,
         )
         draft_id, view_token, edit_token, approve_token, skip_token = token
-        status = "pending" if report.action == "PASS" else "needs_human_attention"
-        self._update_draft_status(draft_id, status)
+        draft_tokens = bind_correlation_ids(draft_id=draft_id)
+        try:
+            status = "pending" if report.action == "PASS" else "needs_human_attention"
+            self._update_draft_status(draft_id, status)
 
-        record = ApprovedDraftRecord(
-            draft_id=draft_id,
-            approve_token=approve_token,
-            edit_token=edit_token,
-            skip_token=skip_token,
-            view_token=view_token,
-            mode=edited.mode,
-            text=edited.final_text,
-            tweets=edited.final_tweets,
-            policy_report=report,
-        )
+            record = ApprovedDraftRecord(
+                draft_id=draft_id,
+                approve_token=approve_token,
+                edit_token=edit_token,
+                skip_token=skip_token,
+                view_token=view_token,
+                mode=edited.mode,
+                text=edited.final_text,
+                tweets=edited.final_tweets,
+                policy_report=report,
+            )
 
-        _, log = self.notifier.execute(record)
-        logs.append(log)
+            _, log = self.notifier.execute(record)
+            logs.append(log)
+        finally:
+            reset_correlation_ids(draft_tokens)
 
     def _finalize_run(
         self,
         run_id: str,
+        source: str,
         status: str,
         started_at: datetime,
         error: str | None,
@@ -438,6 +640,8 @@ class Orchestrator:
     ) -> None:
         finished = datetime.now(UTC)
         duration_ms = int((finished - started_at).total_seconds() * 1000)
+        with contextlib.suppress(Exception):
+            JOB_LATENCY_SECONDS.labels(job="run_daily").observe(duration_ms / 1000.0)
 
         with get_sessionmaker()() as session:
             db.update_run_status(

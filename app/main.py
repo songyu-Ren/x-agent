@@ -1,5 +1,6 @@
 import logging
 import time
+import uuid
 from collections import defaultdict, deque
 from contextlib import asynccontextmanager
 
@@ -10,7 +11,11 @@ from starlette.responses import PlainTextResponse
 
 from app.config import settings
 from app.database import init_db
-from app.observability.logging import setup_logging
+from app.observability.logging import (
+    bind_correlation_ids,
+    reset_correlation_ids,
+    setup_logging,
+)
 from app.observability.metrics import PrometheusMiddleware, metrics_endpoint_response
 from app.observability.otel import setup_otel
 from app.web import router
@@ -23,6 +28,24 @@ setup_logging(
     service_name=settings.OTEL_SERVICE_NAME,
 )
 logger = logging.getLogger(__name__)
+_sentry_initialized = False
+
+if bool(getattr(settings, "SENTRY_ENABLED", False)) and getattr(settings, "SENTRY_DSN", None):
+    try:
+        import sentry_sdk
+        from sentry_sdk.integrations.celery import CeleryIntegration
+        from sentry_sdk.integrations.fastapi import FastApiIntegration
+
+        sentry_sdk.init(
+            dsn=str(settings.SENTRY_DSN),
+            environment=str(getattr(settings, "ENV", "development")),
+            traces_sample_rate=float(getattr(settings, "SENTRY_TRACES_SAMPLE_RATE", 0.0) or 0.0),
+            integrations=[FastApiIntegration(), CeleryIntegration()],
+        )
+        _sentry_initialized = True
+        logger.info("Sentry enabled")
+    except Exception:
+        logger.exception("Failed to initialize Sentry")
 
 
 def _cors_origins() -> list[str]:
@@ -75,6 +98,19 @@ if origins:
         allow_headers=["*"],
     )
 
+
+@app.middleware("http")
+async def correlation_ids(request, call_next):
+    request_id = request.headers.get("x-request-id") or str(uuid.uuid4())
+    tokens = bind_correlation_ids(request_id=request_id)
+    try:
+        response = await call_next(request)
+        response.headers.setdefault("X-Request-ID", request_id)
+        return response
+    finally:
+        reset_correlation_ids(tokens)
+
+
 if str(getattr(settings, "METRICS_ENABLED", "true")).lower() == "true":
     app.add_middleware(PrometheusMiddleware)
     metrics_path = getattr(settings, "METRICS_PATH", "/metrics") or "/metrics"
@@ -85,9 +121,11 @@ _rate_limit_windows: dict[tuple[str, str], deque[float]] = defaultdict(deque)
 
 
 def _rate_limit_key(path: str, method: str) -> str | None:
-    if path == "/health" or path == "/metrics":
+    if path in {"/health", "/metrics", "/api/health", "/api/metrics"}:
         return None
     if path == "/login" and method == "POST":
+        return "auth"
+    if path == "/api/auth/login" and method == "POST":
         return "auth"
     if path.startswith(
         (
@@ -101,6 +139,8 @@ def _rate_limit_key(path: str, method: str) -> str | None:
     ):
         return "actions"
     if path == "/generate-now" and method == "POST":
+        return "actions"
+    if path.startswith("/api/") and method in {"POST", "PUT", "PATCH", "DELETE"}:
         return "actions"
     return None
 
@@ -140,7 +180,14 @@ async def secure_headers(request, call_next):
     response.headers.setdefault("Cross-Origin-Resource-Policy", "same-site")
     response.headers.setdefault(
         "Content-Security-Policy",
-        "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; img-src 'self' data:; base-uri 'self'; frame-ancestors 'none'",
+        (
+            "default-src 'self'; "
+            "style-src 'self' 'unsafe-inline'; "
+            "script-src 'self' 'unsafe-inline'; "
+            "img-src 'self' data:; "
+            "base-uri 'self'; "
+            "frame-ancestors 'none'"
+        ),
     )
     if settings.ENV == "production":
         response.headers.setdefault(

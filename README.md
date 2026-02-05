@@ -19,6 +19,7 @@ It’s designed for:
 - [API & UI endpoints](#api--ui-endpoints)
 - [Development](#development)
 - [Troubleshooting](#troubleshooting)
+- [Production deployment](#production-deployment)
 
 ## What it does
 
@@ -126,7 +127,7 @@ The application uses SQLAlchemy 2.0 and Alembic.
 - Default DB (no `DATABASE_URL`): SQLite file at `DB_PATH` (default: `daily_agent.db`)
 - Production DB: Postgres, e.g. `postgresql+psycopg://user:pass@host:5432/db`
 
-Migrations are applied on startup via [init_db](file:///Users/songyuren/Documents/PersonalProject/x-agent/app/database.py).
+In development, migrations are applied on startup. In production, run migrations as a separate step.
 
 To run migrations manually:
 
@@ -187,3 +188,55 @@ python -m pytest -q
 That endpoint enqueues a Celery task:
 - ensure Redis is reachable via `REDIS_URL`
 - ensure a Celery worker is running (`celery -A app.celery_app worker -l info`)
+
+## Production deployment
+
+### Reverse proxy (Caddy example)
+
+```caddyfile
+example.com {
+  encode gzip
+  reverse_proxy 127.0.0.1:8000
+}
+```
+
+### Reverse proxy (nginx example)
+
+```nginx
+server {
+  listen 80;
+  server_name example.com;
+
+  location / {
+    proxy_pass http://127.0.0.1:8000;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+  }
+}
+```
+
+### Required env vars (production)
+
+- `ENV=production`
+- `SECRET_KEY` (non-default)
+- `ADMIN_USERNAME`, `ADMIN_PASSWORD` (admin login for the console/API)
+- `DATABASE_URL` (recommended Postgres)
+- `REDIS_URL`
+
+To post to X/Twitter (set `DRY_RUN=false`):
+- `TWITTER_API_KEY`, `TWITTER_API_SECRET`, `TWITTER_ACCESS_TOKEN`, `TWITTER_ACCESS_TOKEN_SECRET`
+
+### Migrations (production)
+
+Run migrations before starting new app versions:
+
+```bash
+alembic upgrade head
+```
+
+### Scaling notes
+
+- Run multiple `worker` instances for throughput.
+- Run exactly one `scheduler` (Celery beat) instance.
+- Run one or more `api` instances behind the reverse proxy.

@@ -42,3 +42,15 @@ Desktop.ini
 .___*
 .idea/
 .vscode/
+
+node_modules/
+.next/
+out/
+.turbo/
+.vercel/
+
+dist/
+build/
+*.egg-info/
+
+.python-version

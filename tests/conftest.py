@@ -21,6 +21,7 @@ def clean_db():
         session.execute(delete(models.AuditLog))
         session.execute(delete(models.UserSession))
         session.execute(delete(models.User))
+        session.execute(delete(models.AppConfig))
         session.execute(delete(models.Post))
         session.execute(delete(models.ActionToken))
         session.execute(delete(models.PublishAttempt))

@@ -5,6 +5,7 @@ from apscheduler.triggers.cron import CronTrigger
 
 from app.config import settings
 from app.orchestrator import orchestrator
+from app.runtime_config import get_int, get_str
 
 logger = logging.getLogger(__name__)
 scheduler = AsyncIOScheduler()
@@ -26,9 +27,10 @@ async def scheduled_weekly_report():
 
 
 def start_scheduler():
-    trigger = CronTrigger(
-        hour=settings.SCHEDULE_HOUR, minute=settings.SCHEDULE_MINUTE, timezone=settings.TIMEZONE
-    )
+    hour = get_int("schedule_hour", settings.SCHEDULE_HOUR)
+    minute = get_int("schedule_minute", settings.SCHEDULE_MINUTE)
+    timezone = get_str("timezone", settings.TIMEZONE)
+    trigger = CronTrigger(hour=hour, minute=minute, timezone=timezone)
     scheduler.add_job(scheduled_job, trigger)
 
     style_weekday = int(getattr(settings, "STYLE_UPDATE_WEEKDAY", 1) or 1)
@@ -39,7 +41,7 @@ def start_scheduler():
             day_of_week=(style_weekday - 1) % 7,
             hour=style_hour,
             minute=0,
-            timezone=settings.TIMEZONE,
+            timezone=timezone,
         ),
     )
 
@@ -51,10 +53,8 @@ def start_scheduler():
             day_of_week=(report_weekday - 1) % 7,
             hour=report_hour,
             minute=0,
-            timezone=settings.TIMEZONE,
+            timezone=timezone,
         ),
     )
     scheduler.start()
-    logger.info(
-        f"Scheduler started. Next run at {settings.SCHEDULE_HOUR}:{settings.SCHEDULE_MINUTE} {settings.TIMEZONE}"
-    )
+    logger.info(f"Scheduler started. Next run at {hour}:{minute} {timezone}")
